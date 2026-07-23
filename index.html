@@ -143,26 +143,24 @@
       </div>
     </div>
 
-    <button class="sim-btn" id="simulateScan">Симулировать распознавание (если камера недоступна)</button>
+    <button class="sim-btn" id="simulateScan">Симулировать распознавание</button>
   </div>
 
-  <p class="section-note">Данные из Nextcloud подгружаются автоматически</p>
+  <p class="section-note">Данные из Google Диска подгружаются автоматически</p>
 </div>
 
 <script>
-// Ссылка на публичную таблицу Nextcloud
-// Вставьте сюда ID вашего файла из ссылки Google Диска
-const FILE_ID = '19OphkawbvP9szdu3qYnAC_zs9O7aU1sp'; 
-
-// Прямая ссылка на скачивание файла из Google Drive
-const TABLE_URL = https://docs.google.com/spreadsheets/d/${FILE_ID}/export?format=xlsx;
-const CACHE_MS = 30 * 60 * 1000;
+// ==================== GOOGLE DRIVE И НАСТРОЙКИ ====================
+const FILE_ID = '19OphkawbvP9szdu3qYnAC_zs9O7aU1sp';
+const TABLE_URL = `https://docs.google.com/spreadsheets/d/${FILE_ID}/export?format=xlsx`;
+const CACHE_MS = 30 * 60 * 1000; // Кэш на 30 минут
 
 let tableCache = null;
 let tableCacheTime = 0;
 
 async function fetchTable(){
   try {
+    console.log('Загрузка базы из Google Диска...');
     const resp = await fetch(TABLE_URL);
     if(!resp.ok) throw new Error('HTTP ' + resp.status);
     
@@ -183,12 +181,12 @@ async function fetchTable(){
       data.push({ key, flatlay, model });
     }
 
-    console.log('Успешно загружено из Google Диска. Записей:', data.length);
+    console.log('✅ База успешно загружена. Всего артикулов:', data.length);
     tableCache = data;
     tableCacheTime = Date.now();
     return data;
   } catch(err) {
-    console.error('Ошибка загрузки из Google Drive:', err);
+    console.error('❌ Ошибка загрузки таблицы с Google Drive:', err);
     return [];
   }
 }
@@ -213,12 +211,27 @@ function badge(label, state){
   return `<div class="badge warn">! ${label}: не найдено</div>`;
 }
 
+// Умный поиск артикула
 async function lookup(key){
   try{
     const data = await getTableData();
-    const found = data.find(d => d.key === key);
-    return found || { key, flatlay: null, model: null };
-  }catch(err){
+    if (!data || data.length === 0) {
+      return { key, flatlay: 'error', model: 'error' };
+    }
+
+    const cleanKey = String(key).trim().toUpperCase();
+
+    // 1. Точное совпадение
+    let found = data.find(d => d.key === cleanKey);
+
+    // 2. Поиск без учета символов подчеркивания '_'
+    if (!found) {
+      const normKey = cleanKey.replace(/_/g, '');
+      found = data.find(d => d.key.replace(/_/g, '') === normKey);
+    }
+
+    return found || { key: cleanKey, flatlay: null, model: null };
+  } catch(err) {
     return { key, flatlay: 'error', model: 'error' };
   }
 }
@@ -238,7 +251,7 @@ function renderList(){
   `).join('');
 }
 
-// Первоначальная загрузка
+// Первоначальная фоновая загрузка
 fetchTable();
 
 // ===== РАЗБОР ТЕКСТА OCR =====
@@ -367,7 +380,7 @@ async function showConfirm(parsed){
   document.getElementById('scanToast').style.display = 'none';
 }
 
-// ===== ОБРАБОТКА НАЖАТИЙ КНОПОК =====
+// ===== СОБЫТИЯ КНОПОК =====
 document.getElementById('openCamera').onclick = () => {
   document.getElementById('listScreen').style.display = 'none';
   document.getElementById('cameraScreen').style.display = 'block';
