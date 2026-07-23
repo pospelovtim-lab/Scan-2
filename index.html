@@ -149,10 +149,11 @@
   <p class="section-note">Тестовые данные вместо реальной таблицы — подключим на следующем шаге</p>
 </div>
 
-<script>
-// ===== ТАБЛИЦА ИЗ ОБЛАКА (Nextcloud, публичная ссылка только для чтения) =====
-// Добавляем /download к публичной ссылке — так Nextcloud отдаёт сам файл, а не страницу предпросмотра
-const TABLE_URL = 'https://cloud.melonfashion.ru/s/mCtLz2N5RdpYZYY/download';
+[23.07.2026 20:29] Tim😎: <script>
+// Чтобы обойти CORS-блокировку браузера при локальном запуске HTML-файла, 
+// используем CORS-прокси для ссылки на публичный файл Nextcloud
+const TARGET_URL = 'https://cloud.melonfashion.ru/s/mCtLz2N5RdpYZYY/download';
+const TABLE_URL = 'https://corsproxy.io/?' + encodeURIComponent(TARGET_URL);
 const CACHE_MS = 30 * 60 * 1000; // 30 минут
 
 let tableCache = null;
@@ -169,61 +170,35 @@ async function fetchTable(){
     const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
 
     const data = [];
-    for(let i = 1; i < rows.length; i++){ // i=1 — пропускаем строку заголовков
+    for(let i = 1; i < rows.length; i++){
       const r = rows[i];
       if(!r || !r[0]) continue;
-      
       const key = String(r[0]).trim().toUpperCase();
-      // Проверяем наличия плюсика '+' в колонках
       const flatlay = String(r[1] || '').trim() === '+';
       const model = String(r[2] || '').trim() === '+';
-      
       data.push({ key, flatlay, model });
     }
 
-    // Выносим console.log ИЗ цикла
+    // ЛОГ ВЫНЕСЕН ИЗ ЦИКЛА (не забивает память браузера)
     console.log('Успешно загружено артикулов из облака:', data.length);
 
     tableCache = data;
     tableCacheTime = Date.now();
     tableFetchError = null;
     return data;
-  } catch (err) {
-    console.error('Ошибка загрузки таблицы из Nextcloud:', err);
+  } catch(err) {
+    console.error('Ошибка загрузки таблицы:', err);
     tableFetchError = err;
-    throw err;
+    return []; // Возвращаем пустой массив, чтобы страница не зависала
   }
 }
-  const data = [];
-  for(let i = 1; i < rows.length; i++){ // i=1 — пропускаем строку заголовков
-    const r = rows[i];
-    if(!r || !r[0]) continue;
-    const key = String(r[0]).trim().toUpperCase();
-    const flatlay = String(r[1] || '').trim() === '+';
-    const model = String(r[2] || '').trim() === '+';
-    data.push({ key, flatlay, model });
-    console.log(data);
-  }
 
-  tableCache = data;
-  tableCacheTime = Date.now();
-  tableFetchError = null;
-  return data;
-}
-
-// Возвращает данные из кэша, обновляя их, если прошло больше 30 минут с последней загрузки
 async function getTableData(){
   const isStale = !tableCache || (Date.now() - tableCacheTime) > CACHE_MS;
   if(isStale){
-    try{
-      await fetchTable();
-    }catch(err){
-      tableFetchError = err;
-      if(!tableCache) throw err; // совсем нет данных — ошибка настоящая
-      // если старые данные есть — используем их, просто помечаем как устаревшие ниже
-    }
+    await fetchTable();
   }
-  return tableCache;
+  return tableCache || [];
 }
 
 const HISTORY_LIMIT = 50;
@@ -232,10 +207,10 @@ let counter = 0;
 let pendingItem = null;
 
 function badge(label, state){
-  if(state===true) return `<div class="badge ok">✓ ${label}</div>`;
-  if(state===false) return `<div class="badge no">✕ ${label}</div>`;
-  if(state==='error') return `<div class="badge warn">! ${label}: ошибка</div>`;
-  return `<div class="badge warn">! ${label}: не найдено</div>`;
+  if(state===true) return <div class="badge ok">✓ ${label}</div>;
+  if(state===false) return <div class="badge no">✕ ${label}</div>;
+  if(state==='error') return <div class="badge warn">! ${label}: ошибка</div>;
+  return <div class="badge warn">! ${label}: не найдено</div>;
 }
 
 async function lookup(key){
@@ -255,55 +230,46 @@ function addItem(found){
 
 function renderList(){
   document.getElementById('empty').style.display = items.length ? 'none' : 'block';
-  document.getElementById('list').innerHTML = items.map(item => `
+  document.getElementById('list').innerHTML = items.map(item => 
     <div class="card">
       <span class="art">${item.key}</span>
       <div class="badges">${badge('Вешалка', item.flatlay)}${badge('Модель', item.model)}</div>
     </div>
-  `).join('');
+  ).join('');
 }
 
-// Подгружаем таблицу заранее при открытии страницы, чтобы первый скан не ждал загрузки
-fetchTable().catch(err => { tableFetchError = err; });
+// Загружаем таблицу
+fetchTable();
 
-// ===== РАЗБОР ТЕКСТА, РАСПОЗНАННОГО OCR =====
-// Логика: ищем "BF" + цифры сразу после — это артикул.
-// Смотрим на следующую (или через одну) строку — первое найденное там число — это цвет.
+// ===== РАЗБОР ТЕКСТА OCR =====
 function parseOcrText(rawText){
   const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-
   for(let i = 0; i < lines.length; i++){
     const articulMatch = lines[i].match(/BF\s*([0-9]{3,})/i);
     if(!articulMatch) continue;
-
     const articul = 'BF' + articulMatch[1];
 
-    // Ищем цвет на следующей строке, а если там пусто — ещё через одну
     for(let j = i + 1; j <= i + 2 && j < lines.length; j++){
       const colorMatch = lines[j].match(/(\d+)/);
       if(colorMatch){
-        return { articul, color: colorMatch[1], key: `${articul}_${colorMatch[1]}` };
+        return { articul, color: colorMatch[1], key: ${articul}_${colorMatch[1]} };
       }
     }
-
-    // Артикул нашли, а цвет — нет
     return { articul, color: null, key: null };
   }
-
-  return null; // вообще ничего похожего на артикул не нашли
+  return null;
 }
 
 // ===== КАМЕРА И OCR =====
 let stream = null;
 let ocrTimer = null;
 let ocrBusy = false;
-let worker = null; // переиспользуемый Tesseract worker — создаём один раз, а не на каждый кадр
+let worker = null; 
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ocrStatus = document.getElementById('ocrStatus');
 const camError = document.getElementById('camError');
-
-async function getWorker(){
+[23.07.2026 20:29] Tim😎: async function getWorker(){
   if(worker) return worker;
   ocrStatus.textContent = 'Загружаем модуль распознавания…';
   worker = await Tesseract.createWorker('eng');
@@ -323,18 +289,18 @@ async function startCamera(){
     });
     video.srcObject = stream;
     await video.play();
-    await getWorker(); // готовим worker заранее, пока пользователь наводит камеру
+    await getWorker();
     ocrStatus.textContent = 'Наводим камеру и держим ровно…';
     startOcrLoop();
   }catch(err){
     ocrStatus.textContent = '';
     camError.style.display = 'block';
     if(err.name === 'NotAllowedError'){
-      camError.textContent = 'Доступ к камере запрещён. Разрешите доступ в настройках браузера и откройте камеру заново.';
+      camError.textContent = 'Доступ к камере запрещён.';
     } else if(err.name === 'NotFoundError'){
       camError.textContent = 'Камера не найдена на этом устройстве.';
     } else {
-      camError.textContent = 'Не удалось получить доступ к камере: ' + err.message;
+      camError.textContent = 'Ошибка камеры: ' + err.message;
     }
   }
 }
@@ -345,7 +311,6 @@ function stopCamera(){
     stream.getTracks().forEach(t => t.stop());
     stream = null;
   }
-  // worker намеренно не завершаем — переиспользуем при следующем открытии камеры в этой сессии
 }
 
 function startOcrLoop(){
@@ -354,8 +319,6 @@ function startOcrLoop(){
 }
 
 async function runOcrPass(){
-  // Пропускаем такт, если предыдущее распознавание ещё не закончилось,
-  // или уже показана карточка подтверждения (ждём решения пользователя)
   if(ocrBusy || document.getElementById('confirmCard').style.display === 'block') return;
   if(!video.videoWidth) return;
 
@@ -363,7 +326,6 @@ async function runOcrPass(){
   ocrStatus.textContent = 'Распознаём…';
 
   try{
-    // Вырезаем из кадра только область внутри рамки — так точнее и быстрее
     const vw = video.videoWidth, vh = video.videoHeight;
     const side = Math.min(vw, vh) * 0.72;
     const sx = (vw - side) / 2;
@@ -376,19 +338,18 @@ async function runOcrPass(){
 
     const w = await getWorker();
     const { data } = await w.recognize(canvas);
-
     const parsed = parseOcrText(data.text || '');
 
     if(parsed && parsed.key){
       await showConfirm(parsed);
       ocrStatus.textContent = 'Распознано';
     } else if(parsed && parsed.articul){
-      ocrStatus.textContent = `Вижу артикул ${parsed.articul}, ищу цвет…`;
+      ocrStatus.textContent = Вижу артикул ${parsed.articul}, ищу цвет…;
     } else {
       ocrStatus.textContent = 'Наводим камеру и держим ровно…';
     }
   }catch(err){
-    ocrStatus.textContent = 'Ошибка распознавания, пробуем снова…';
+    ocrStatus.textContent = 'Ошибка распознавания…';
   }finally{
     ocrBusy = false;
   }
@@ -402,7 +363,7 @@ async function showConfirm(parsed){
   document.getElementById('scanToast').style.display = 'none';
 }
 
-// ===== ОБРАБОТЧИКИ ИНТЕРФЕЙСА =====
+// ===== ОБРАБОТЧИКИ НАЖАТИЙ КНОПОК =====
 document.getElementById('openCamera').onclick = () => {
   document.getElementById('listScreen').style.display = 'none';
   document.getElementById('cameraScreen').style.display = 'block';
@@ -418,17 +379,15 @@ document.getElementById('closeCamera').onclick = () => {
   renderList();
 };
 
-// Кнопка-заглушка на случай, если камера недоступна (например, тестирование с компьютера без камеры)
 document.getElementById('simulateScan').onclick = async () => {
   if(!tableCache || tableCache.length === 0){
-    await showConfirm({ key: 'BF00000000_00' }); // таблица ещё не загрузилась или пуста
+    await showConfirm({ key: 'BF00000000_00' });
     return;
   }
   const d = tableCache[Math.floor(Math.random()*tableCache.length)];
   await showConfirm({ key: d.key });
 };
-
-document.getElementById('acceptBtn').onclick = () => {
+[23.07.2026 20:29] Tim😎: document.getElementById('acceptBtn').onclick = () => {
   if(!pendingItem) return;
   addItem(pendingItem);
   document.getElementById('confirmCard').style.display = 'none';
