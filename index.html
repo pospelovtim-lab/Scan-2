@@ -151,15 +151,15 @@
 
 <script>
 // Ссылка на публичную таблицу Nextcloud
-const ORIGINAL_URL = 'https://cloud.melonfashion.ru/s/7f5jWDGYqrXR63n/download';
+// Вставьте сюда ID вашего файла из ссылки Google Диска
+const FILE_ID = '19OphkawbvP9szdu3qYnAC_zs9O7aU1sp'; 
 
-// Используем CORS-прокси для обхода блокировок браузера при запуск с любого источника
-const TABLE_URL = 'https://corsproxy.io/?' + encodeURIComponent(ORIGINAL_URL);
-const CACHE_MS = 30 * 60 * 1000; // 30 минут
+// Прямая ссылка на скачивание файла из Google Drive
+const TABLE_URL = https://docs.google.com/spreadsheets/d/${FILE_ID}/export?format=xlsx;
+const CACHE_MS = 30 * 60 * 1000;
 
 let tableCache = null;
 let tableCacheTime = 0;
-let tableFetchError = null;
 
 async function fetchTable(){
   try {
@@ -175,20 +175,20 @@ async function fetchTable(){
     for(let i = 1; i < rows.length; i++){
       const r = rows[i];
       if(!r || !r[0]) continue;
+      
       const key = String(r[0]).trim().toUpperCase();
       const flatlay = String(r[1] || '').trim() === '+';
       const model = String(r[2] || '').trim() === '+';
+      
       data.push({ key, flatlay, model });
     }
 
-    console.log('Успешно подгружена база артикулов. Записей:', data.length);
+    console.log('Успешно загружено из Google Диска. Записей:', data.length);
     tableCache = data;
     tableCacheTime = Date.now();
-    tableFetchError = null;
     return data;
   } catch(err) {
-    console.error('Ошибка загрузки таблицы из Nextcloud:', err);
-    tableFetchError = err;
+    console.error('Ошибка загрузки из Google Drive:', err);
     return [];
   }
 }
