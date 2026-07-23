@@ -165,7 +165,8 @@ async function fetchTable(){
   const buf = await resp.arrayBuffer();
   const wb = XLSX.read(buf, { type: 'array' });
   const sheet = wb.Sheets[wb.SheetNames[0]];
-  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }); // массив массивов, без заголовков-объектов
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+  console.log(rows);// массив массивов, без заголовков-объектов
 
   const data = [];
   for(let i = 1; i < rows.length; i++){ // i=1 — пропускаем строку заголовков
@@ -175,6 +176,7 @@ async function fetchTable(){
     const flatlay = String(r[1] || '').trim() === '+';
     const model = String(r[2] || '').trim() === '+';
     data.push({ key, flatlay, model });
+    console.log(data);
   }
 
   tableCache = data;
