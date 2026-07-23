@@ -160,14 +160,40 @@ let tableCacheTime = 0;
 let tableFetchError = null;
 
 async function fetchTable(){
-  const resp = await fetch(TABLE_URL);
-  if(!resp.ok) throw new Error('HTTP ' + resp.status);
-  const buf = await resp.arrayBuffer();
-  const wb = XLSX.read(buf, { type: 'array' });
-  const sheet = wb.Sheets[wb.SheetNames[0]];
-  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-  console.log(rows);// массив массивов, без заголовков-объектов
+  try {
+    const resp = await fetch(TABLE_URL);
+    if(!resp.ok) throw new Error('HTTP ' + resp.status);
+    const buf = await resp.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
 
+    const data = [];
+    for(let i = 1; i < rows.length; i++){ // i=1 — пропускаем строку заголовков
+      const r = rows[i];
+      if(!r || !r[0]) continue;
+      
+      const key = String(r[0]).trim().toUpperCase();
+      // Проверяем наличия плюсика '+' в колонках
+      const flatlay = String(r[1] || '').trim() === '+';
+      const model = String(r[2] || '').trim() === '+';
+      
+      data.push({ key, flatlay, model });
+    }
+
+    // Выносим console.log ИЗ цикла
+    console.log('Успешно загружено артикулов из облака:', data.length);
+
+    tableCache = data;
+    tableCacheTime = Date.now();
+    tableFetchError = null;
+    return data;
+  } catch (err) {
+    console.error('Ошибка загрузки таблицы из Nextcloud:', err);
+    tableFetchError = err;
+    throw err;
+  }
+}
   const data = [];
   for(let i = 1; i < rows.length; i++){ // i=1 — пропускаем строку заголовков
     const r = rows[i];
