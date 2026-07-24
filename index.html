@@ -124,7 +124,7 @@
     <p class="ocr-status" id="ocrStatus">Наводим камеру и держим ровно…</p>
     <div class="cam-error" id="camError"></div>
 
-    <!-- Всплывающее подтверждение (пункт 2 — подтверждение перед поиском) -->
+    <!-- Всплывающее подтверждение -->
     <div class="confirm-card" id="confirmCard">
       <p class="label">Распознано</p>
       <p class="value" id="confirmValue">BF12345678_50</p>
@@ -143,59 +143,60 @@
       </div>
     </div>
 
-    <button class="sim-btn" id="simulateScan">Симулировать распознавание (если камера недоступна)</button>
+    <button class="sim-btn" id="simulateScan">Симулировать распознавание</button>
   </div>
 
-  <p class="section-note">Тестовые данные вместо реальной таблицы — подключим на следующем шаге</p>
+  <p class="section-note">Данные из Google Диска подгружаются автоматически</p>
 </div>
 
 <script>
-// ===== ТАБЛИЦА ИЗ ОБЛАКА (Nextcloud, публичная ссылка только для чтения) =====
-// Добавляем /download к публичной ссылке — так Nextcloud отдаёт сам файл, а не страницу предпросмотра
-const TABLE_URL = 'https://cloud.melonfashion.ru/s/qzTAA6psSRXFiGb/download';
-const CACHE_MS = 30 * 60 * 1000; // 30 минут
+// ==================== GOOGLE DRIVE И НАСТРОЙКИ ====================
+const FILE_ID = '19OphkawbvP9szdu3qYnAC_zs9O7aU1sp';
+const TABLE_URL = `https://docs.google.com/spreadsheets/d/${FILE_ID}/export?format=xlsx`;
+const CACHE_MS = 30 * 60 * 1000; // Кэш на 30 минут
 
 let tableCache = null;
 let tableCacheTime = 0;
-let tableFetchError = null;
 
 async function fetchTable(){
-  const resp = await fetch(TABLE_URL);
-  if(!resp.ok) throw new Error('HTTP ' + resp.status);
-  const buf = await resp.arrayBuffer();
-  const wb = XLSX.read(buf, { type: 'array' });
-  const sheet = wb.Sheets[wb.SheetNames[0]];
-  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 }); // массив массивов, без заголовков-объектов
+  try {
+    console.log('Загрузка базы из Google Диска...');
+    const resp = await fetch(TABLE_URL);
+    if(!resp.ok) throw new Error('HTTP ' + resp.status);
+    
+    const buf = await resp.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
 
-  const data = [];
-  for(let i = 1; i < rows.length; i++){ // i=1 — пропускаем строку заголовков
-    const r = rows[i];
-    if(!r || !r[0]) continue;
-    const key = String(r[0]).trim().toUpperCase();
-    const flatlay = String(r[1] || '').trim() === '+';
-    const model = String(r[2] || '').trim() === '+';
-    data.push({ key, flatlay, model });
+    const data = [];
+    for(let i = 1; i < rows.length; i++){
+      const r = rows[i];
+      if(!r || !r[0]) continue;
+      
+      const key = String(r[0]).trim().toUpperCase();
+      const flatlay = String(r[1] || '').trim() === '+';
+      const model = String(r[2] || '').trim() === '+';
+      
+      data.push({ key, flatlay, model });
+    }
+
+    console.log('✅ База успешно загружена. Всего артикулов:', data.length);
+    tableCache = data;
+    tableCacheTime = Date.now();
+    return data;
+  } catch(err) {
+    console.error('❌ Ошибка загрузки таблицы с Google Drive:', err);
+    return [];
   }
-
-  tableCache = data;
-  tableCacheTime = Date.now();
-  tableFetchError = null;
-  return data;
 }
 
-// Возвращает данные из кэша, обновляя их, если прошло больше 30 минут с последней загрузки
 async function getTableData(){
   const isStale = !tableCache || (Date.now() - tableCacheTime) > CACHE_MS;
   if(isStale){
-    try{
-      await fetchTable();
-    }catch(err){
-      tableFetchError = err;
-      if(!tableCache) throw err; // совсем нет данных — ошибка настоящая
-      // если старые данные есть — используем их, просто помечаем как устаревшие ниже
-    }
+    await fetchTable();
   }
-  return tableCache;
+  return tableCache || [];
 }
 
 const HISTORY_LIMIT = 50;
@@ -210,12 +211,27 @@ function badge(label, state){
   return `<div class="badge warn">! ${label}: не найдено</div>`;
 }
 
+// Умный поиск артикула
 async function lookup(key){
   try{
     const data = await getTableData();
-    const found = data.find(d => d.key === key);
-    return found || { key, flatlay: null, model: null };
-  }catch(err){
+    if (!data || data.length === 0) {
+      return { key, flatlay: 'error', model: 'error' };
+    }
+
+    const cleanKey = String(key).trim().toUpperCase();
+
+    // 1. Точное совпадение
+    let found = data.find(d => d.key === cleanKey);
+
+    // 2. Поиск без учета символов подчеркивания '_'
+    if (!found) {
+      const normKey = cleanKey.replace(/_/g, '');
+      found = data.find(d => d.key.replace(/_/g, '') === normKey);
+    }
+
+    return found || { key: cleanKey, flatlay: null, model: null };
+  } catch(err) {
     return { key, flatlay: 'error', model: 'error' };
   }
 }
@@ -235,10 +251,10 @@ function renderList(){
   `).join('');
 }
 
-// Подгружаем таблицу заранее при открытии страницы, чтобы первый скан не ждал загрузки
-fetchTable().catch(err => { tableFetchError = err; });
+// Первоначальная фоновая загрузка
+fetchTable();
 
-// ===== РАЗБОР ТЕКСТА, РАСПОЗНАННОГО OCR =====
+// ===== РАЗБОР ТЕКСТА OCR =====
 // Логика: ищем "BF" + цифры сразу после — это артикул.
 // Если после BF не ровно 10 цифр — это либо ошибка распознавания, либо "увеличенный"
 // формат с буквами (который пока не обрабатываем) — такой скан отбрасываем сразу,
@@ -246,16 +262,16 @@ fetchTable().catch(err => { tableFetchError = err; });
 // Иначе смотрим на следующую (или через одну) строку — первое найденное там число — это цвет.
 function parseOcrText(rawText){
   const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-
+ 
   for(let i = 0; i < lines.length; i++){
     const articulMatch = lines[i].match(/BF\s*([0-9]{3,})/i);
     if(!articulMatch) continue;
-
+ 
     // Проверка длины: артикул с BF должен содержать ровно 10 цифр после BF.
     if(articulMatch[1].length !== 10) continue;
-
+ 
     const articul = 'BF' + articulMatch[1];
-
+ 
     // Ищем цвет на следующей строке, а если там пусто — ещё через одну
     for(let j = i + 1; j <= i + 2 && j < lines.length; j++){
       const colorMatch = lines[j].match(/(\d+)/);
@@ -263,14 +279,14 @@ function parseOcrText(rawText){
         return { articul, color: colorMatch[1], key: `${articul}_${colorMatch[1]}` };
       }
     }
-
+ 
     // Артикул нашли (валидной длины), а цвет — нет
     return { articul, color: null, key: null };
   }
-
+ 
   return null; // вообще ничего похожего на валидный артикул не нашли
 }
-
+ 
 // ===== КАМЕРА И OCR =====
 let stream = null;
 let ocrTimer = null;
@@ -280,7 +296,7 @@ const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ocrStatus = document.getElementById('ocrStatus');
 const camError = document.getElementById('camError');
-
+ 
 async function getWorker(){
   if(worker) return worker;
   ocrStatus.textContent = 'Загружаем модуль распознавания…';
@@ -291,7 +307,7 @@ async function getWorker(){
   });
   return worker;
 }
-
+ 
 async function startCamera(){
   camError.style.display = 'none';
   camError.textContent = '';
@@ -317,7 +333,7 @@ async function startCamera(){
     }
   }
 }
-
+ 
 function stopCamera(){
   if(ocrTimer){ clearInterval(ocrTimer); ocrTimer = null; }
   if(stream){
@@ -326,42 +342,42 @@ function stopCamera(){
   }
   // worker намеренно не завершаем — переиспользуем при следующем открытии камеры в этой сессии
 }
-
+ 
 function startOcrLoop(){
   if(ocrTimer) clearInterval(ocrTimer);
   ocrTimer = setInterval(runOcrPass, 500);
 }
-
+ 
 async function runOcrPass(){
   // Пропускаем такт, если предыдущее распознавание ещё не закончилось,
   // или уже показана карточка подтверждения (ждём решения пользователя)
   if(ocrBusy || document.getElementById('confirmCard').style.display === 'block') return;
   if(!video.videoWidth) return;
-
+ 
   ocrBusy = true;
   ocrStatus.textContent = 'Распознаём…';
-
+ 
   try{
     // Вырезаем из кадра только область внутри рамки — так точнее и быстрее
     const vw = video.videoWidth, vh = video.videoHeight;
     const side = Math.min(vw, vh) * 0.72;
     const sx = (vw - side) / 2;
     const sy = (vh - side) / 2;
-
+ 
     // Дополнительно приводим вырезанную область к фиксированному размеру перед OCR —
     // меньше пикселей для Tesseract, но с запасом на мелкий шрифт
     const targetSize = 600;
-
+ 
     canvas.width = targetSize;
     canvas.height = targetSize;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(video, sx, sy, side, side, 0, 0, targetSize, targetSize);
-
+ 
     const w = await getWorker();
     const { data } = await w.recognize(canvas);
-
+ 
     const parsed = parseOcrText(data.text || '');
-
+ 
     if(parsed && parsed.key){
       await showConfirm(parsed);
       ocrStatus.textContent = 'Распознано';
@@ -376,6 +392,14 @@ async function runOcrPass(){
     ocrBusy = false;
   }
 }
+ 
+async function showConfirm(parsed){
+  pendingItem = await lookup(parsed.key);
+  document.getElementById('confirmValue').textContent = pendingItem.key;
+  document.getElementById('confirmBadges').innerHTML = badge('Вешалка', pendingItem.flatlay) + badge('Модель', pendingItem.model);
+  document.getElementById('confirmCard').style.display = 'block';
+  document.getElementById('scanToast').style.display = 'none';
+}
 
 async function showConfirm(parsed){
   pendingItem = await lookup(parsed.key);
@@ -385,7 +409,7 @@ async function showConfirm(parsed){
   document.getElementById('scanToast').style.display = 'none';
 }
 
-// ===== ОБРАБОТЧИКИ ИНТЕРФЕЙСА =====
+// ===== СОБЫТИЯ КНОПОК =====
 document.getElementById('openCamera').onclick = () => {
   document.getElementById('listScreen').style.display = 'none';
   document.getElementById('cameraScreen').style.display = 'block';
@@ -401,10 +425,9 @@ document.getElementById('closeCamera').onclick = () => {
   renderList();
 };
 
-// Кнопка-заглушка на случай, если камера недоступна (например, тестирование с компьютера без камеры)
 document.getElementById('simulateScan').onclick = async () => {
   if(!tableCache || tableCache.length === 0){
-    await showConfirm({ key: 'BF00000000_00' }); // таблица ещё не загрузилась или пуста
+    await showConfirm({ key: 'BF00000000_00' });
     return;
   }
   const d = tableCache[Math.floor(Math.random()*tableCache.length)];
