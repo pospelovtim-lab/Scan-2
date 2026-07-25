@@ -256,9 +256,9 @@ fetchTable();
 
 // ===== РАЗБОР ТЕКСТА OCR =====
 // Логика: ищем "BF" + цифры сразу после — это артикул.
-// Если после BF не ровно 10 цифр — это либо ошибка распознавания, либо "увеличенный"
-// формат с буквами (который пока не обрабатываем) — такой скан отбрасываем сразу,
-// не тратя время на поиск цвета и поход в таблицу.
+// Если после BF меньше 10 цифр — это либо ошибка распознавания, либо неполный скан —
+// такой скан отбрасываем сразу, не тратя время на поиск цвета и поход в таблицу.
+// 10 и более цифр — валидно (артикулы могут "увеличиваться" за счёт добавления символов в конце).
 // Иначе смотрим на следующую (или через одну) строку — первое найденное там число — это цвет.
 function parseOcrText(rawText){
   const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
@@ -267,8 +267,8 @@ function parseOcrText(rawText){
     const articulMatch = lines[i].match(/BF\s*([0-9]{3,})/i);
     if(!articulMatch) continue;
  
-    // Проверка длины: артикул с BF должен содержать ровно 10 цифр после BF.
-    if(articulMatch[1].length !== 10) continue;
+    // Проверка длины: артикул с BF должен содержать 10 и более цифр после BF.
+    if(articulMatch[1].length < 10) continue;
  
     const articul = 'BF' + articulMatch[1];
  
@@ -289,7 +289,7 @@ function parseOcrText(rawText){
  
 // ===== КАМЕРА И OCR =====
 let stream = null;
-let ocrTimer = null;
+let ocrRunning = false; // флаг: цикл распознавания активен (камера открыта)
 let ocrBusy = false;
 let worker = null; // переиспользуемый Tesseract worker — создаём один раз, а не на каждый кадр
 const video = document.getElementById('video');
@@ -335,7 +335,7 @@ async function startCamera(){
 }
  
 function stopCamera(){
-  if(ocrTimer){ clearInterval(ocrTimer); ocrTimer = null; }
+  ocrRunning = false; // цикл сам остановится на следующей проверке этого флага
   if(stream){
     stream.getTracks().forEach(t => t.stop());
     stream = null;
@@ -344,15 +344,20 @@ function stopCamera(){
 }
  
 function startOcrLoop(){
-  if(ocrTimer) clearInterval(ocrTimer);
-  ocrTimer = setInterval(runOcrPass, 500);
+  ocrRunning = true;
+  runOcrPass(); // запускаем цепочку — каждая следующая попытка стартует сама сразу после завершения предыдущей
 }
  
 async function runOcrPass(){
-  // Пропускаем такт, если предыдущее распознавание ещё не закончилось,
-  // или уже показана карточка подтверждения (ждём решения пользователя)
-  if(ocrBusy || document.getElementById('confirmCard').style.display === 'block') return;
-  if(!video.videoWidth) return;
+  if(!ocrRunning) return; // камера закрыта — останавливаем цепочку
+
+  // Если предыдущее распознавание почему-то ещё идёт, или показана карточка
+  // подтверждения (ждём решения пользователя) — не запускаем OCR, но
+  // проверяем состояние ещё раз чуть позже, а не бросаем цикл вовсе
+  if(ocrBusy || document.getElementById('confirmCard').style.display === 'block' || !video.videoWidth){
+    setTimeout(runOcrPass, 100);
+    return;
+  }
  
   ocrBusy = true;
   ocrStatus.textContent = 'Распознаём…';
@@ -390,6 +395,7 @@ async function runOcrPass(){
     ocrStatus.textContent = 'Ошибка распознавания, пробуем снова…';
   }finally{
     ocrBusy = false;
+    if(ocrRunning) runOcrPass(); // сразу планируем следующую попытку, без искусственной паузы
   }
 }
  
