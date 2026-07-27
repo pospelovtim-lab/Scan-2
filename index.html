@@ -507,4 +507,135 @@ async function runBarcodePass(){
   barcodeBusy = true;
   ocrStatus.textContent = 'Ищем штрихкод…';
   try{
-    const vw = video.videoWidth
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const side = Math.min(vw, vh) * 0.72;
+    const sx = (vw - side) / 2;
+    const sy = (vh - side) / 2;
+    const targetSize = 1200; // больше разрешение для EAN-13
+
+    canvas.width = targetSize;
+    canvas.height = targetSize;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, sx, sy, side, side, 0, 0, targetSize, targetSize);
+
+    // Конвертируем RGBA (4 байта) в RGB (3 байта) для ZXing
+    const imageData = ctx.getImageData(0, 0, targetSize, targetSize);
+    const rgba = imageData.data;
+    const rgb = new Uint8Array(targetSize * targetSize * 3);
+    for(let i = 0, j = 0; i < rgba.length; i += 4, j += 3){
+      rgb[j] = rgba[i];
+      rgb[j + 1] = rgba[i + 1];
+      rgb[j + 2] = rgba[i + 2];
+    }
+
+    const luminanceSource = new ZXing.RGBLuminanceSource(rgb, targetSize, targetSize);
+    const binaryBitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(luminanceSource));
+    const result = barcodeReader.decodeWithState(binaryBitmap);
+    const code = result.text;
+
+    if(barcodeCache && barcodeCache.has(code)){
+      await showConfirm({ key: barcodeCache.get(code), source: 'barcode' });
+      ocrStatus.textContent = 'Распознано (ШК)';
+    } else {
+      ocrStatus.textContent = `Штрихкод ${code} прочитан, но не найден в таблице`;
+    }
+  }catch(e){
+    // Штрихкод не найден на кадре — нормально
+    ocrStatus.textContent = 'Ищем штрихкод…';
+  }finally{
+    barcodeBusy = false;
+    if(barcodeRunning) runBarcodePass();
+  }
+}
+
+async function showConfirm(parsed){
+  pendingItem = await lookup(parsed.key);
+  document.getElementById('confirmValue').textContent = pendingItem.key;
+  const sourceLabel = parsed.source === 'barcode' ? 'Источник: ШК' : parsed.source === 'ocr' ? 'Источник: OCR' : '';
+  document.getElementById('confirmSource').textContent = sourceLabel;
+  document.getElementById('confirmBadges').innerHTML = badge('Вешалка', pendingItem.flatlay) + badge('Модель', pendingItem.model);
+  document.getElementById('confirmCard').style.display = 'block';
+  document.getElementById('scanToast').style.display = 'none';
+}
+
+// ===== СОБЫТИЯ КНОПОК =====
+function openCameraWithMode(mode){
+  document.getElementById('listScreen').style.display = 'none';
+  document.getElementById('cameraScreen').style.display = 'block';
+  document.getElementById('confirmCard').style.display = 'none';
+  document.getElementById('scanToast').style.display = 'none';
+  document.getElementById('barcodeManual').style.display = mode === 'barcode' ? 'flex' : 'none';
+  startCamera(mode);
+}
+
+document.getElementById('openCameraOcr').onclick = () => openCameraWithMode('ocr');
+document.getElementById('openCameraBarcode').onclick = () => openCameraWithMode('barcode');
+
+document.getElementById('closeCamera').onclick = () => {
+  stopCamera();
+  document.getElementById('cameraScreen').style.display = 'none';
+  document.getElementById('listScreen').style.display = 'block';
+  renderList();
+};
+
+document.getElementById('simulateScan').onclick = async () => {
+  if(!tableCache || tableCache.length === 0){
+    await showConfirm({ key: 'BF00000000_00' });
+    return;
+  }
+  const d = tableCache[Math.floor(Math.random()*tableCache.length)];
+  await showConfirm({ key: d.key });
+};
+
+document.getElementById('acceptBtn').onclick = () => {
+  if(!pendingItem) return;
+  addItem(pendingItem);
+  document.getElementById('confirmCard').style.display = 'none';
+  const toast = document.getElementById('scanToast');
+  toast.style.display = 'flex';
+  document.getElementById('scanToastText').textContent = pendingItem.key;
+  pendingItem = null;
+  clearTimeout(window._t);
+  window._t = setTimeout(()=>{ toast.style.display='none'; }, 1600);
+};
+
+document.getElementById('rejectBtn').onclick = () => {
+  pendingItem = null;
+  document.getElementById('confirmCard').style.display = 'none';
+};
+
+document.getElementById('manualAdd').onclick = async () => {
+  const val = document.getElementById('manualInput').value.trim();
+  if(!val) return;
+  const found = await lookup(val.toUpperCase());
+  addItem(found);
+  document.getElementById('manualInput').value = '';
+  renderList();
+};
+
+document.getElementById('clearBtn').onclick = () => { items = []; renderList(); };
+
+
+// Ручной ввод штрихкода (для отладки)
+document.getElementById('barcodeCheck').onclick = async () => {
+  const code = document.getElementById('barcodeInput').value.trim();
+  if(!code) return;
+  if(!barcodeCache){
+    ocrStatus.textContent = 'Таблица штрихкодов ещё загружается…';
+    return;
+  }
+  if(barcodeCache.has(code)){
+    await showConfirm({ key: barcodeCache.get(code), source: 'barcode' });
+    ocrStatus.textContent = 'Распознано (ШК, ручной ввод)';
+  } else {
+    ocrStatus.textContent = `Штрихкод ${code} не найден в таблице`;
+  }
+};
+document.getElementById('barcodeInput').addEventListener('keypress', (e) => {
+  if(e.key === 'Enter') document.getElementById('barcodeCheck').click();
+});
+
+renderList();
+</script>
+</body>
+</html>
