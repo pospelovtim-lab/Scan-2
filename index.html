@@ -162,13 +162,25 @@ const CACHE_MS = 30 * 60 * 1000; // Кэш на 30 минут
 let tableCache = null;
 let tableCacheTime = 0;
 
+// ===== ВАРИАНТ Б: повторные попытки при ошибке =====
+async function fetchWithRetry(url, retries = 3, delay = 2000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return await resp.arrayBuffer();
+    } catch (err) {
+      if (i === retries - 1) throw err;
+      console.warn(`Попытка ${i + 1} не удалась, ждём ${delay}мс...`, err.message);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
 async function fetchTable(){
   try {
     console.log('Загрузка базы из Google Диска...');
-    const resp = await fetch(TABLE_URL);
-    if(!resp.ok) throw new Error('HTTP ' + resp.status);
-    
-    const buf = await resp.arrayBuffer();
+    const buf = await fetchWithRetry(TABLE_URL);
     const wb = XLSX.read(buf, { type: 'array' });
     const sheet = wb.Sheets[wb.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
@@ -255,25 +267,16 @@ function renderList(){
   `).join('');
 }
 
-// Первоначальная фоновая загрузка
-fetchTable();
-
 // ==================== ТАБЛИЦА ШТРИХКОДОВ ====================
-// Отдельная таблица: 1-й столбец — штрихкод, 3-й — артикул, 5-й — цвет.
-// В отличие от основной таблицы статусов, эта грузится один раз при открытии
-// страницы и дальше не перекачивается — штрихкоды не меняются так часто, как статусы фото.
 const BARCODE_FILE_ID = '1pv6XYQuxQOoNBPCY7-pzbexk1qhdjJlS';
 const BARCODE_TABLE_URL = `https://docs.google.com/spreadsheets/d/${BARCODE_FILE_ID}/export?format=xlsx`;
 
-let barcodeCache = null; // Map: штрихкод -> ключ вида "АРТИКУЛ_ЦВЕТ"
+let barcodeCache = null;
 
 async function fetchBarcodeTable(){
   try {
     console.log('Загрузка таблицы штрихкодов...');
-    const resp = await fetch(BARCODE_TABLE_URL);
-    if(!resp.ok) throw new Error('HTTP ' + resp.status);
-
-    const buf = await resp.arrayBuffer();
+    const buf = await fetchWithRetry(BARCODE_TABLE_URL);
     const wb = XLSX.read(buf, { type: 'array' });
     const sheet = wb.Sheets[wb.SheetNames[0]];
     const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
@@ -299,18 +302,13 @@ async function fetchBarcodeTable(){
   }
 }
 
-fetchBarcodeTable();
+// ===== ВАРИАНТ А: последовательная загрузка =====
+(async function init(){
+  await fetchTable();
+  await fetchBarcodeTable();
+})();
 
 // ===== РАЗБОР ТЕКСТА OCR =====
-// Способ 1 (приоритетный): якорь на слово "Цвет"/"Colour" — оно устойчивее встречается на
-// бирках, чем конкретный формат артикула, и не зависит от того, начинается артикул на "BF"
-// или нет. Цвет берём с самой строки-якоря (или со следующих 1-2 строк, если на якорной
-// строке числа нет — как на бирках, где "Цвет:" и число разнесены по строкам). Артикул —
-// это ближайшая строка НАД якорем, но только если в ней вообще есть цифра: это защита от
-// случая, когда между артикулом и "Цвет" в кадр попадает строка с названием бренда
-// (буквы без цифр) — такую строку в артикул принять нельзя.
-// Способ 2 (резервный): если якоря "Цвет"/"Colour" не нашли вообще — старая логика,
-// ищем "BF" + 10 и более цифр сразу после.
 function parseOcrText(rawText){
   const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
@@ -332,8 +330,6 @@ function parseOcrText(rawText){
         return { articul, color: colorMatch[1], key: `${articul}_${colorMatch[1]}` };
       }
     }
-    // Якорь "Цвет"/"Colour" нашли, но строку артикула над ним с цифрой — нет.
-    // Не возвращаем результат по этому якорю, пробуем способ 2 ниже.
   }
 
   for(let i = 0; i < lines.length; i++){
@@ -354,31 +350,24 @@ function parseOcrText(rawText){
     return { articul, color: null, key: null };
   }
 
-  return null; // вообще ничего похожего на валидный артикул не нашли
+  return null;
 }
 
 // ===== КАМЕРА И OCR =====
 let stream = null;
-let ocrRunning = false; // флаг: цикл распознавания активен (камера открыта)
+let ocrRunning = false;
 let ocrBusy = false;
-let worker = null; // переиспользуемый Tesseract worker — создаём один раз, а не на каждый кадр
+let worker = null;
 const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ocrStatus = document.getElementById('ocrStatus');
 const camError = document.getElementById('camError');
 const barcodeImg = document.getElementById('barcodeImg');
 
-// Голосование по кадрам: не показываем карточку по первому же распознанному ключу,
-// а копим последние VOTE_WINDOW валидных чтений (артикул+цвет) и ждём, пока один и тот же
-// ключ не наберётся VOTE_THRESHOLD раз — так одиночные ошибки OCR отфильтровываются.
-// Голосование применяется только к OCR: штрихкод у него есть собственная контрольная
-// сумма (EAN-13), поэтому найденный и подтверждённый по таблице штрихкод показываем сразу.
 const VOTE_WINDOW = 8;
 const VOTE_THRESHOLD = 5;
 let recentReads = [];
 
-// zxing декодирует штрихкод из уже открытого видеопотока (тот же canvas, что и OCR) —
-// без второго обращения к камере, это единственный поток на всё приложение.
 const barcodeHints = new Map();
 barcodeHints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13]);
 const barcodeReader = new ZXing.BrowserMultiFormatReader(barcodeHints);
@@ -387,8 +376,6 @@ function resetVoting(){
   recentReads = [];
 }
 
-// Тестовый режим: OCR и штрихкод запускаются отдельными кнопками и работают каждый
-// по своему циклу, без пересечения — barcodeRunning/barcodeBusy не связаны с ocrRunning/ocrBusy.
 let barcodeRunning = false;
 let barcodeBusy = false;
 
@@ -398,7 +385,7 @@ async function getWorker(){
   worker = await Tesseract.createWorker('eng');
   await worker.setParameters({
     tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789: ',
-    tessedit_pageseg_mode: '6' // "единый однородный блок текста" — быстрее и точнее для простой бирки
+    tessedit_pageseg_mode: '6'
   });
   return worker;
 }
@@ -416,7 +403,7 @@ async function startCamera(mode){
     await video.play();
 
     if(mode === 'ocr'){
-      await getWorker(); // готовим worker заранее, пока пользователь наводит камеру
+      await getWorker();
       ocrStatus.textContent = 'Наводим камеру и держим ровно…';
       startOcrLoop();
     } else {
@@ -437,20 +424,19 @@ async function startCamera(mode){
 }
 
 function stopCamera(){
-  ocrRunning = false; // оба цикла сами остановятся на следующей проверке своего флага
+  ocrRunning = false;
   barcodeRunning = false;
   resetVoting();
-  try{ barcodeReader.reset(); }catch(e){ /* нечего останавливать — это нормально */ }
+  try{ barcodeReader.reset(); }catch(e){}
   if(stream){
     stream.getTracks().forEach(t => t.stop());
     stream = null;
   }
-  // worker намеренно не завершаем — переиспользуем при следующем открытии камеры в этой сессии
 }
 
 function startOcrLoop(){
   ocrRunning = true;
-  runOcrPass(); // запускаем цепочку — каждая следующая попытка стартует сама сразу после завершения предыдущей
+  runOcrPass();
 }
 
 function startBarcodeLoop(){
@@ -458,8 +444,6 @@ function startBarcodeLoop(){
   runBarcodePass();
 }
 
-// Приводим вырезанный кадр к чёрно-белому с усиленным контрастом и порогом (threshold) —
-// убирает тени/блики от лампы и подаёт в Tesseract более "чистую" картинку.
 function preprocessCanvas(ctx, width, height){
   const imageData = ctx.getImageData(0, 0, width, height);
   const d = imageData.data;
@@ -475,11 +459,8 @@ function preprocessCanvas(ctx, width, height){
 }
 
 async function runOcrPass(){
-  if(!ocrRunning) return; // камера закрыта — останавливаем цепочку
+  if(!ocrRunning) return;
 
-  // Если предыдущее распознавание почему-то ещё идёт, или показана карточка
-  // подтверждения (ждём решения пользователя) — не запускаем OCR, но
-  // проверяем состояние ещё раз чуть позже, а не бросаем цикл вовсе
   if(ocrBusy || document.getElementById('confirmCard').style.display === 'block' || !video.videoWidth){
     setTimeout(runOcrPass, 100);
     return;
@@ -489,15 +470,10 @@ async function runOcrPass(){
   ocrStatus.textContent = 'Распознаём…';
 
   try{
-    // Вырезаем из кадра только область внутри рамки — так точнее и быстрее
     const vw = video.videoWidth, vh = video.videoHeight;
     const side = Math.min(vw, vh) * 0.72;
     const sx = (vw - side) / 2;
     const sy = (vh - side) / 2;
-
-    // Дополнительно приводим вырезанную область к фиксированному размеру перед OCR.
-    // Подняли с 600 до 900 — движку достаётся больше пикселей на букву, каждый прогон
-    // OCR стал дольше, но это компенсируется голосованием по кадрам ниже.
     const targetSize = 900;
 
     canvas.width = targetSize;
@@ -538,14 +514,12 @@ async function runOcrPass(){
     ocrStatus.textContent = 'Ошибка распознавания, пробуем снова…';
   }finally{
     ocrBusy = false;
-    if(ocrRunning) runOcrPass(); // сразу планируем следующую попытку, без искусственной паузы
+    if(ocrRunning) runOcrPass();
   }
 }
 
-// Отдельный, независимый цикл штрихкода — не трогает ocrRunning/ocrBusy/recentReads,
-// не запускает OCR ни при каких обстоятельствах. Только штрихкод.
 async function runBarcodePass(){
-  if(!barcodeRunning) return; // камера закрыта — останавливаем цепочку
+  if(!barcodeRunning) return;
 
   if(barcodeBusy || document.getElementById('confirmCard').style.display === 'block' || !video.videoWidth){
     setTimeout(runBarcodePass, 100);
