@@ -85,8 +85,8 @@
   .barcode-manual.active{display:flex;}
   .barcode-manual input{flex:1;height:44px;padding:0 12px;font-size:15px;border-radius:10px;border:1px solid var(--border);background:var(--surface);}
   .barcode-manual button{width:44px;height:44px;flex-shrink:0;font-size:18px;background:var(--primary);color:var(--on-primary);border:none;border-radius:10px;}
-  #qr-reader{position:absolute;inset:0;z-index:0;display:none;}
-  #qr-reader video{width:100%!important;height:100%!important;object-fit:cover!important;}
+  #qr-reader{position:absolute;inset:0;z-index:0;display:none;width:100%;height:100%;}
+  #qr-reader video{width:100%!important;height:100%!important;object-fit:cover!important;border-radius:20px!important;}
 </style>
 </head>
 <body>
@@ -271,6 +271,7 @@ const BARCODE_FILE_ID = '1pv6XYQuxQOoNBPCY7-pzbexk1qhdjJlS';
 const BARCODE_TABLE_URL = `https://docs.google.com/spreadsheets/d/${BARCODE_FILE_ID}/export?format=xlsx`;
 
 let barcodeCache = null;
+let barcodeScanned = false;
 
 async function fetchBarcodeTable(){
   try {
@@ -396,17 +397,30 @@ async function startCamera(mode){
       document.getElementById('video').style.display = 'none';
       document.getElementById('qr-reader').style.display = 'block';
       ocrStatus.textContent = 'Запрашиваем доступ к камере…';
+      barcodeScanned = false;
       html5QrCode = new Html5Qrcode("qr-reader");
       await html5QrCode.start(
         { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 250, height: 250 } },
+        {
+          fps: 10,
+          qrbox: { width: 250, height: 250 },
+          formatsToSupport: [ Html5QrcodeSupportedFormats.EAN_13 ]
+        },
         async (decodedText) => {
+          if(barcodeScanned) return;
           if(document.getElementById('confirmCard').style.display === 'block') return;
-          if(barcodeCache && barcodeCache.has(decodedText)){
-            await showConfirm({ key: barcodeCache.get(decodedText), source: 'barcode' });
-            ocrStatus.textContent = 'Распознано (ШК)';
-          } else {
-            ocrStatus.textContent = `Штрихкод ${decodedText} прочитан, но не найден в таблице`;
+          const code = String(decodedText).trim();
+          try {
+            if(barcodeCache && barcodeCache.has(code)){
+              barcodeScanned = true;
+              await showConfirm({ key: barcodeCache.get(code), source: 'barcode' });
+              ocrStatus.textContent = 'Распознано (ШК)';
+            } else {
+              ocrStatus.textContent = `Штрихкод «${code}» не найден в таблице`;
+            }
+          } catch(err) {
+            console.error('Ошибка в обработке ШК:', err);
+            ocrStatus.textContent = 'Ошибка обработки штрихкода';
           }
         },
         () => { /* нет штрихкода на кадре — нормально */ }
@@ -429,6 +443,7 @@ async function startCamera(mode){
 function stopCamera(){
   ocrRunning = false;
   resetVoting();
+  barcodeScanned = false;
   if(stream){
     stream.getTracks().forEach(t => t.stop());
     stream = null;
