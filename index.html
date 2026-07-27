@@ -6,7 +6,7 @@
 <title>Макет: сканирование артикулов</title>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.18.6/umd/index.min.js"></script>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <style>
   :root{
     --bg:#f4f4f5; --surface:#ffffff; --border:#e4e4e7; --text:#18181b; --muted:#71717a;
@@ -85,6 +85,8 @@
   .barcode-manual.active{display:flex;}
   .barcode-manual input{flex:1;height:44px;padding:0 12px;font-size:15px;border-radius:10px;border:1px solid var(--border);background:var(--surface);}
   .barcode-manual button{width:44px;height:44px;flex-shrink:0;font-size:18px;background:var(--primary);color:var(--on-primary);border:none;border-radius:10px;}
+  #qr-reader{position:absolute;inset:0;z-index:0;display:none;}
+  #qr-reader video{width:100%!important;height:100%!important;object-fit:cover!important;}
 </style>
 </head>
 <body>
@@ -113,6 +115,7 @@
   <!-- ЭКРАН КАМЕРЫ -->
   <div class="camera-screen" id="cameraScreen">
     <div class="viewport">
+      <div id="qr-reader"></div>
       <video id="video" autoplay playsinline muted></video>
       <div class="cam-topbar">
         <button class="close-btn" id="closeCamera">✕</button>
@@ -353,14 +356,8 @@ const VOTE_WINDOW = 8;
 const VOTE_THRESHOLD = 5;
 let recentReads = [];
 
-let barcodeRunning = false;
-let barcodeBusy = false;
 
-// ZXing: используем MultiFormatReader напрямую с canvas (надёжнее BrowserMultiFormatReader для EAN-13)
-const barcodeReader = new ZXing.MultiFormatReader();
-const barcodeHints = new Map();
-barcodeHints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13]);
-barcodeReader.setHints(barcodeHints);
+let html5QrCode = null; // экземпляр Html5Qrcode для режима штрихкода
 
 function resetVoting(){
   recentReads = [];
@@ -380,22 +377,41 @@ async function getWorker(){
 async function startCamera(mode){
   camError.style.display = 'none';
   camError.textContent = '';
-  ocrStatus.textContent = 'Запрашиваем доступ к камере…';
   resetVoting();
   try{
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1000 }, height: { ideal: 1000 } }
-    });
-    video.srcObject = stream;
-    await video.play();
-
     if(mode === 'ocr'){
+      document.getElementById('video').style.display = 'block';
+      document.getElementById('qr-reader').style.display = 'none';
+      ocrStatus.textContent = 'Запрашиваем доступ к камере…';
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 1000 }, height: { ideal: 1000 } }
+      });
+      video.srcObject = stream;
+      await video.play();
       await getWorker();
       ocrStatus.textContent = 'Наводим камеру и держим ровно…';
       startOcrLoop();
     } else {
+      // Режим штрихкода — html5-qrcode сам откроет камеру
+      document.getElementById('video').style.display = 'none';
+      document.getElementById('qr-reader').style.display = 'block';
+      ocrStatus.textContent = 'Запрашиваем доступ к камере…';
+      html5QrCode = new Html5Qrcode("qr-reader");
+      await html5QrCode.start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: { width: 250, height: 250 } },
+        async (decodedText) => {
+          if(document.getElementById('confirmCard').style.display === 'block') return;
+          if(barcodeCache && barcodeCache.has(decodedText)){
+            await showConfirm({ key: barcodeCache.get(decodedText), source: 'barcode' });
+            ocrStatus.textContent = 'Распознано (ШК)';
+          } else {
+            ocrStatus.textContent = `Штрихкод ${decodedText} прочитан, но не найден в таблице`;
+          }
+        },
+        () => { /* нет штрихкода на кадре — нормально */ }
+      );
       ocrStatus.textContent = 'Наводим камеру на штрихкод…';
-      startBarcodeLoop();
     }
   }catch(err){
     ocrStatus.textContent = '';
@@ -412,12 +428,17 @@ async function startCamera(mode){
 
 function stopCamera(){
   ocrRunning = false;
-  barcodeRunning = false;
   resetVoting();
   if(stream){
     stream.getTracks().forEach(t => t.stop());
     stream = null;
   }
+  if(html5QrCode){
+    html5QrCode.stop().catch(() => {});
+    html5QrCode = null;
+  }
+  document.getElementById('video').style.display = 'block';
+  document.getElementById('qr-reader').style.display = 'none';
 }
 
 function startOcrLoop(){
