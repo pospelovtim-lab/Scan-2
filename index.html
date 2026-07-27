@@ -6,6 +6,7 @@
 <title>Макет: сканирование артикулов</title>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.18.6/umd/index.min.js"></script>
 <style>
   :root{
     --bg:#f4f4f5; --surface:#ffffff; --border:#e4e4e7; --text:#18181b; --muted:#71717a;
@@ -128,6 +129,7 @@
     <div class="confirm-card" id="confirmCard">
       <p class="label">Распознано</p>
       <p class="value" id="confirmValue">BF12345678_50</p>
+      <p class="label" id="confirmSource" style="margin:-8px 0 10px;"></p>
       <div class="badges" id="confirmBadges" style="margin-bottom:12px;"></div>
       <div class="confirm-actions">
         <button id="rejectBtn">Отменить</button>
@@ -254,39 +256,105 @@ function renderList(){
 // Первоначальная фоновая загрузка
 fetchTable();
 
+// ==================== ТАБЛИЦА ШТРИХКОДОВ ====================
+// Отдельная таблица: 1-й столбец — штрихкод, 3-й — артикул, 5-й — цвет.
+// В отличие от основной таблицы статусов, эта грузится один раз при открытии
+// страницы и дальше не перекачивается — штрихкоды не меняются так часто, как статусы фото.
+const BARCODE_FILE_ID = '1pv6XYQuxQOoNBPCY7-pzbexk1qhdjJlS';
+const BARCODE_TABLE_URL = `https://docs.google.com/spreadsheets/d/${BARCODE_FILE_ID}/export?format=xlsx`;
+
+let barcodeCache = null; // Map: штрихкод -> ключ вида "АРТИКУЛ_ЦВЕТ"
+
+async function fetchBarcodeTable(){
+  try {
+    console.log('Загрузка таблицы штрихкодов...');
+    const resp = await fetch(BARCODE_TABLE_URL);
+    if(!resp.ok) throw new Error('HTTP ' + resp.status);
+
+    const buf = await resp.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+
+    const map = new Map();
+    for(let i = 1; i < rows.length; i++){
+      const r = rows[i];
+      if(!r || !r[0]) continue;
+
+      const barcode = String(r[0]).trim();
+      const articul = String(r[2] || '').trim().toUpperCase();
+      const color = String(r[4] || '').trim();
+      if(!barcode || !articul || !color) continue;
+
+      map.set(barcode, `${articul}_${color}`);
+    }
+
+    console.log('✅ Таблица штрихкодов загружена. Всего:', map.size);
+    barcodeCache = map;
+  } catch(err) {
+    console.error('❌ Ошибка загрузки таблицы штрихкодов:', err);
+    barcodeCache = new Map();
+  }
+}
+
+fetchBarcodeTable();
+
 // ===== РАЗБОР ТЕКСТА OCR =====
-// Логика: ищем "BF" + цифры сразу после — это артикул.
-// Если после BF меньше 10 цифр — это либо ошибка распознавания, либо неполный скан —
-// такой скан отбрасываем сразу, не тратя время на поиск цвета и поход в таблицу.
-// 10 и более цифр — валидно (артикулы могут "увеличиваться" за счёт добавления символов в конце).
-// Иначе смотрим на следующую (или через одну) строку — первое найденное там число — это цвет.
+// Способ 1 (приоритетный): якорь на слово "Цвет"/"Colour" — оно устойчивее встречается на
+// бирках, чем конкретный формат артикула, и не зависит от того, начинается артикул на "BF"
+// или нет. Цвет берём с самой строки-якоря (или со следующих 1-2 строк, если на якорной
+// строке числа нет — как на бирках, где "Цвет:" и число разнесены по строкам). Артикул —
+// это ближайшая строка НАД якорем, но только если в ней вообще есть цифра: это защита от
+// случая, когда между артикулом и "Цвет" в кадр попадает строка с названием бренда
+// (буквы без цифр) — такую строку в артикул принять нельзя.
+// Способ 2 (резервный): если якоря "Цвет"/"Colour" не нашли вообще — старая логика,
+// ищем "BF" + 10 и более цифр сразу после.
 function parseOcrText(rawText){
   const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
- 
+
+  for(let i = 0; i < lines.length; i++){
+    if(!/цвет|colour|color/i.test(lines[i])) continue;
+
+    let colorMatch = lines[i].match(/(\d+)/);
+    if(!colorMatch){
+      for(let j = i + 1; j <= i + 2 && j < lines.length; j++){
+        colorMatch = lines[j].match(/(\d+)/);
+        if(colorMatch) break;
+      }
+    }
+    if(!colorMatch) continue;
+
+    for(let k = i - 1; k >= 0 && k >= i - 3; k--){
+      if(/\d/.test(lines[k])){
+        const articul = lines[k].replace(/\s+/g, '');
+        return { articul, color: colorMatch[1], key: `${articul}_${colorMatch[1]}` };
+      }
+    }
+    // Якорь "Цвет"/"Colour" нашли, но строку артикула над ним с цифрой — нет.
+    // Не возвращаем результат по этому якорю, пробуем способ 2 ниже.
+  }
+
   for(let i = 0; i < lines.length; i++){
     const articulMatch = lines[i].match(/BF\s*([0-9]{3,})/i);
     if(!articulMatch) continue;
- 
-    // Проверка длины: артикул с BF должен содержать 10 и более цифр после BF.
+
     if(articulMatch[1].length < 10) continue;
- 
+
     const articul = 'BF' + articulMatch[1];
- 
-    // Ищем цвет на следующей строке, а если там пусто — ещё через одну
+
     for(let j = i + 1; j <= i + 2 && j < lines.length; j++){
       const colorMatch = lines[j].match(/(\d+)/);
       if(colorMatch){
         return { articul, color: colorMatch[1], key: `${articul}_${colorMatch[1]}` };
       }
     }
- 
-    // Артикул нашли (валидной длины), а цвет — нет
+
     return { articul, color: null, key: null };
   }
- 
+
   return null; // вообще ничего похожего на валидный артикул не нашли
 }
- 
+
 // ===== КАМЕРА И OCR =====
 let stream = null;
 let ocrRunning = false; // флаг: цикл распознавания активен (камера открыта)
@@ -296,7 +364,26 @@ const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ocrStatus = document.getElementById('ocrStatus');
 const camError = document.getElementById('camError');
- 
+
+// Голосование по кадрам: не показываем карточку по первому же распознанному ключу,
+// а копим последние VOTE_WINDOW валидных чтений (артикул+цвет) и ждём, пока один и тот же
+// ключ не наберётся VOTE_THRESHOLD раз — так одиночные ошибки OCR отфильтровываются.
+// Голосование применяется только к OCR: штрихкод у него есть собственная контрольная
+// сумма (EAN-13), поэтому найденный и подтверждённый по таблице штрихкод показываем сразу.
+const VOTE_WINDOW = 8;
+const VOTE_THRESHOLD = 5;
+let recentReads = [];
+
+// zxing декодирует штрихкод из уже открытого видеопотока (тот же canvas, что и OCR) —
+// без второго обращения к камере, это единственный поток на всё приложение.
+const barcodeHints = new Map();
+barcodeHints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13]);
+const barcodeReader = new ZXing.BrowserMultiFormatReader(barcodeHints);
+
+function resetVoting(){
+  recentReads = [];
+}
+
 async function getWorker(){
   if(worker) return worker;
   ocrStatus.textContent = 'Загружаем модуль распознавания…';
@@ -307,11 +394,12 @@ async function getWorker(){
   });
   return worker;
 }
- 
+
 async function startCamera(){
   camError.style.display = 'none';
   camError.textContent = '';
   ocrStatus.textContent = 'Запрашиваем доступ к камере…';
+  resetVoting();
   try{
     stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 1000 }, height: { ideal: 1000 } }
@@ -333,21 +421,39 @@ async function startCamera(){
     }
   }
 }
- 
+
 function stopCamera(){
   ocrRunning = false; // цикл сам остановится на следующей проверке этого флага
+  resetVoting();
+  try{ barcodeReader.reset(); }catch(e){ /* нечего останавливать — это нормально */ }
   if(stream){
     stream.getTracks().forEach(t => t.stop());
     stream = null;
   }
   // worker намеренно не завершаем — переиспользуем при следующем открытии камеры в этой сессии
 }
- 
+
 function startOcrLoop(){
   ocrRunning = true;
   runOcrPass(); // запускаем цепочку — каждая следующая попытка стартует сама сразу после завершения предыдущей
 }
- 
+
+// Приводим вырезанный кадр к чёрно-белому с усиленным контрастом и порогом (threshold) —
+// убирает тени/блики от лампы и подаёт в Tesseract более "чистую" картинку.
+function preprocessCanvas(ctx, width, height){
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const d = imageData.data;
+  const contrast = 1.6;
+  const threshold = 150;
+  for(let i = 0; i < d.length; i += 4){
+    const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    let val = (gray - 128) * contrast + 128;
+    val = val > threshold ? 255 : 0;
+    d[i] = d[i + 1] = d[i + 2] = val;
+  }
+  ctx.putImageData(imageData, 0, 0);
+}
+
 async function runOcrPass(){
   if(!ocrRunning) return; // камера закрыта — останавливаем цепочку
 
@@ -358,38 +464,77 @@ async function runOcrPass(){
     setTimeout(runOcrPass, 100);
     return;
   }
- 
+
   ocrBusy = true;
   ocrStatus.textContent = 'Распознаём…';
- 
+
   try{
     // Вырезаем из кадра только область внутри рамки — так точнее и быстрее
     const vw = video.videoWidth, vh = video.videoHeight;
     const side = Math.min(vw, vh) * 0.72;
     const sx = (vw - side) / 2;
     const sy = (vh - side) / 2;
- 
-    // Дополнительно приводим вырезанную область к фиксированному размеру перед OCR —
-    // меньше пикселей для Tesseract, но с запасом на мелкий шрифт
-    const targetSize = 600;
- 
+
+    // Дополнительно приводим вырезанную область к фиксированному размеру перед OCR.
+    // Подняли с 600 до 900 — движку достаётся больше пикселей на букву, каждый прогон
+    // OCR стал дольше, но это компенсируется голосованием по кадрам ниже.
+    const targetSize = 900;
+
     canvas.width = targetSize;
     canvas.height = targetSize;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(video, sx, sy, side, side, 0, 0, targetSize, targetSize);
- 
-    const w = await getWorker();
-    const { data } = await w.recognize(canvas);
- 
-    const parsed = parseOcrText(data.text || '');
- 
-    if(parsed && parsed.key){
-      await showConfirm(parsed);
-      ocrStatus.textContent = 'Распознано';
-    } else if(parsed && parsed.articul){
-      ocrStatus.textContent = `Вижу артикул ${parsed.articul}, ищу цвет…`;
+
+    // Сначала пробуем штрихкод — на том же вырезанном под рамку кадре, ещё до того как
+    // картинка приведена к чёрно-белому порогу для OCR (порог мешает штрихкод-декодеру,
+    // у него своя внутренняя бинаризация).
+    let barcodeParsed = null;
+    try{
+      const result = await barcodeReader.decodeFromCanvas(canvas);
+      const code = result.getText();
+      if(barcodeCache && barcodeCache.has(code)){
+        barcodeParsed = { key: barcodeCache.get(code), source: 'barcode' };
+      }
+      // Штрихкод прочитан, но в таблице штрихкодов его нет — молча идём в OCR ниже.
+    }catch(e){
+      // Штрихкод не найден в кадре — это нормальная ситуация на каждом кадре, молча продолжаем.
+    }
+
+    if(barcodeParsed){
+      await showConfirm(barcodeParsed);
+      resetVoting();
+      ocrStatus.textContent = 'Распознано (ШК)';
     } else {
-      ocrStatus.textContent = 'Наводим камеру и держим ровно…';
+      preprocessCanvas(ctx, targetSize, targetSize);
+
+      const w = await getWorker();
+      const { data } = await w.recognize(canvas);
+
+      const parsed = parseOcrText(data.text || '');
+
+      if(parsed && parsed.key){
+        recentReads.push(parsed.key);
+        if(recentReads.length > VOTE_WINDOW) recentReads.shift();
+
+        const counts = {};
+        let bestKey = null, bestCount = 0;
+        for(const k of recentReads){
+          counts[k] = (counts[k] || 0) + 1;
+          if(counts[k] > bestCount){ bestCount = counts[k]; bestKey = k; }
+        }
+
+        if(bestCount >= VOTE_THRESHOLD){
+          await showConfirm({ key: bestKey, source: 'ocr' });
+          resetVoting();
+          ocrStatus.textContent = 'Распознано (OCR)';
+        } else {
+          ocrStatus.textContent = `Распознаём… (${bestCount}/${VOTE_THRESHOLD})`;
+        }
+      } else if(parsed && parsed.articul){
+        ocrStatus.textContent = `Вижу артикул ${parsed.articul}, ищу цвет…`;
+      } else {
+        ocrStatus.textContent = 'Наводим камеру и держим ровно…';
+      }
     }
   }catch(err){
     ocrStatus.textContent = 'Ошибка распознавания, пробуем снова…';
@@ -398,18 +543,12 @@ async function runOcrPass(){
     if(ocrRunning) runOcrPass(); // сразу планируем следующую попытку, без искусственной паузы
   }
 }
- 
-async function showConfirm(parsed){
-  pendingItem = await lookup(parsed.key);
-  document.getElementById('confirmValue').textContent = pendingItem.key;
-  document.getElementById('confirmBadges').innerHTML = badge('Вешалка', pendingItem.flatlay) + badge('Модель', pendingItem.model);
-  document.getElementById('confirmCard').style.display = 'block';
-  document.getElementById('scanToast').style.display = 'none';
-}
 
 async function showConfirm(parsed){
   pendingItem = await lookup(parsed.key);
   document.getElementById('confirmValue').textContent = pendingItem.key;
+  const sourceLabel = parsed.source === 'barcode' ? 'Источник: ШК' : parsed.source === 'ocr' ? 'Источник: OCR' : '';
+  document.getElementById('confirmSource').textContent = sourceLabel;
   document.getElementById('confirmBadges').innerHTML = badge('Вешалка', pendingItem.flatlay) + badge('Модель', pendingItem.model);
   document.getElementById('confirmCard').style.display = 'block';
   document.getElementById('scanToast').style.display = 'none';
