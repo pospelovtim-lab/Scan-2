@@ -81,6 +81,7 @@
   .ocr-status{text-align:center;font-size:12px;color:var(--muted);margin-top:10px;min-height:16px;}
   .cam-error{display:none;margin-top:14px;background:var(--danger-bg);color:var(--danger-text);border-radius:12px;padding:12px 14px;font-size:13px;text-align:center;}
 </style>
+<base target="_blank">
 </head>
 <body>
 <div class="phone">
@@ -122,7 +123,6 @@
       </div>
     </div>
     <canvas id="canvas" style="display:none;"></canvas>
-    <img id="barcodeImg" style="display:none;">
 
     <p class="ocr-status" id="ocrStatus">Наводим камеру и держим ровно…</p>
     <div class="cam-error" id="camError"></div>
@@ -157,12 +157,12 @@
 // ==================== GOOGLE DRIVE И НАСТРОЙКИ ====================
 const FILE_ID = '19OphkawbvP9szdu3qYnAC_zs9O7aU1sp';
 const TABLE_URL = `https://docs.google.com/spreadsheets/d/${FILE_ID}/export?format=xlsx`;
-const CACHE_MS = 30 * 60 * 1000; // Кэш на 30 минут
+const CACHE_MS = 30 * 60 * 1000;
 
 let tableCache = null;
 let tableCacheTime = 0;
 
-// ===== ВАРИАНТ Б: повторные попытки при ошибке =====
+// ===== ПОВТОРНЫЕ ПОПЫТКИ ПРИ ОШИБКЕ =====
 async function fetchWithRetry(url, retries = 3, delay = 2000) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -171,7 +171,6 @@ async function fetchWithRetry(url, retries = 3, delay = 2000) {
       return await resp.arrayBuffer();
     } catch (err) {
       if (i === retries - 1) throw err;
-      console.warn(`Попытка ${i + 1} не удалась, ждём ${delay}мс...`, err.message);
       await new Promise(r => setTimeout(r, delay));
     }
   }
@@ -179,7 +178,6 @@ async function fetchWithRetry(url, retries = 3, delay = 2000) {
 
 async function fetchTable(){
   try {
-    console.log('Загрузка базы из Google Диска...');
     const buf = await fetchWithRetry(TABLE_URL);
     const wb = XLSX.read(buf, { type: 'array' });
     const sheet = wb.Sheets[wb.SheetNames[0]];
@@ -189,29 +187,25 @@ async function fetchTable(){
     for(let i = 1; i < rows.length; i++){
       const r = rows[i];
       if(!r || !r[0]) continue;
-      
       const key = String(r[0]).trim().toUpperCase();
       const flatlay = String(r[1] || '').trim() === '+';
       const model = String(r[2] || '').trim() === '+';
-      
       data.push({ key, flatlay, model });
     }
 
-    console.log('✅ База успешно загружена. Всего артикулов:', data.length);
+    console.log('✅ База загружена. Артикулов:', data.length);
     tableCache = data;
     tableCacheTime = Date.now();
     return data;
   } catch(err) {
-    console.error('❌ Ошибка загрузки таблицы с Google Drive:', err);
+    console.error('❌ Ошибка загрузки таблицы статусов:', err);
     return [];
   }
 }
 
 async function getTableData(){
   const isStale = !tableCache || (Date.now() - tableCacheTime) > CACHE_MS;
-  if(isStale){
-    await fetchTable();
-  }
+  if(isStale) await fetchTable();
   return tableCache || [];
 }
 
@@ -227,25 +221,18 @@ function badge(label, state){
   return `<div class="badge warn">! ${label}: не найдено</div>`;
 }
 
-// Умный поиск артикула
 async function lookup(key){
   try{
     const data = await getTableData();
     if (!data || data.length === 0) {
       return { key, flatlay: 'error', model: 'error' };
     }
-
     const cleanKey = String(key).trim().toUpperCase();
-
-    // 1. Точное совпадение
     let found = data.find(d => d.key === cleanKey);
-
-    // 2. Поиск без учета символов подчеркивания '_'
     if (!found) {
       const normKey = cleanKey.replace(/_/g, '');
       found = data.find(d => d.key.replace(/_/g, '') === normKey);
     }
-
     return found || { key: cleanKey, flatlay: null, model: null };
   } catch(err) {
     return { key, flatlay: 'error', model: 'error' };
@@ -275,7 +262,6 @@ let barcodeCache = null;
 
 async function fetchBarcodeTable(){
   try {
-    console.log('Загрузка таблицы штрихкодов...');
     const buf = await fetchWithRetry(BARCODE_TABLE_URL);
     const wb = XLSX.read(buf, { type: 'array' });
     const sheet = wb.Sheets[wb.SheetNames[0]];
@@ -285,12 +271,10 @@ async function fetchBarcodeTable(){
     for(let i = 1; i < rows.length; i++){
       const r = rows[i];
       if(!r || !r[0]) continue;
-
       const barcode = String(r[0]).trim();
       const articul = String(r[2] || '').trim().toUpperCase();
       const color = String(r[4] || '').trim();
       if(!barcode || !articul || !color) continue;
-
       map.set(barcode, `${articul}_${color}`);
     }
 
@@ -302,7 +286,7 @@ async function fetchBarcodeTable(){
   }
 }
 
-// ===== ВАРИАНТ А: последовательная загрузка =====
+// ===== ПОСЛЕДОВАТЕЛЬНАЯ ЗАГРУЗКА =====
 (async function init(){
   await fetchTable();
   await fetchBarcodeTable();
@@ -314,7 +298,6 @@ function parseOcrText(rawText){
 
   for(let i = 0; i < lines.length; i++){
     if(!/цвет|colour|color/i.test(lines[i])) continue;
-
     let colorMatch = lines[i].match(/(\d+)/);
     if(!colorMatch){
       for(let j = i + 1; j <= i + 2 && j < lines.length; j++){
@@ -323,7 +306,6 @@ function parseOcrText(rawText){
       }
     }
     if(!colorMatch) continue;
-
     for(let k = i - 1; k >= 0 && k >= i - 3; k--){
       if(/\d/.test(lines[k])){
         const articul = lines[k].replace(/\s+/g, '');
@@ -335,21 +317,16 @@ function parseOcrText(rawText){
   for(let i = 0; i < lines.length; i++){
     const articulMatch = lines[i].match(/BF\s*([0-9]{3,})/i);
     if(!articulMatch) continue;
-
     if(articulMatch[1].length < 10) continue;
-
     const articul = 'BF' + articulMatch[1];
-
     for(let j = i + 1; j <= i + 2 && j < lines.length; j++){
       const colorMatch = lines[j].match(/(\d+)/);
       if(colorMatch){
         return { articul, color: colorMatch[1], key: `${articul}_${colorMatch[1]}` };
       }
     }
-
     return { articul, color: null, key: null };
   }
-
   return null;
 }
 
@@ -362,22 +339,23 @@ const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ocrStatus = document.getElementById('ocrStatus');
 const camError = document.getElementById('camError');
-const barcodeImg = document.getElementById('barcodeImg');
 
 const VOTE_WINDOW = 8;
 const VOTE_THRESHOLD = 5;
 let recentReads = [];
 
+let barcodeRunning = false;
+let barcodeBusy = false;
+
+// ZXing: используем MultiFormatReader напрямую с canvas (надёжнее BrowserMultiFormatReader для EAN-13)
+const barcodeReader = new ZXing.MultiFormatReader();
 const barcodeHints = new Map();
 barcodeHints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13]);
-const barcodeReader = new ZXing.BrowserMultiFormatReader(barcodeHints);
+barcodeReader.setHints(barcodeHints);
 
 function resetVoting(){
   recentReads = [];
 }
-
-let barcodeRunning = false;
-let barcodeBusy = false;
 
 async function getWorker(){
   if(worker) return worker;
@@ -427,7 +405,6 @@ function stopCamera(){
   ocrRunning = false;
   barcodeRunning = false;
   resetVoting();
-  try{ barcodeReader.reset(); }catch(e){}
   if(stream){
     stream.getTracks().forEach(t => t.stop());
     stream = null;
@@ -460,15 +437,12 @@ function preprocessCanvas(ctx, width, height){
 
 async function runOcrPass(){
   if(!ocrRunning) return;
-
   if(ocrBusy || document.getElementById('confirmCard').style.display === 'block' || !video.videoWidth){
     setTimeout(runOcrPass, 100);
     return;
   }
-
   ocrBusy = true;
   ocrStatus.textContent = 'Распознаём…';
-
   try{
     const vw = video.videoWidth, vh = video.videoHeight;
     const side = Math.min(vw, vh) * 0.72;
@@ -484,20 +458,17 @@ async function runOcrPass(){
 
     const w = await getWorker();
     const { data } = await w.recognize(canvas);
-
     const parsed = parseOcrText(data.text || '');
 
     if(parsed && parsed.key){
       recentReads.push(parsed.key);
       if(recentReads.length > VOTE_WINDOW) recentReads.shift();
-
       const counts = {};
       let bestKey = null, bestCount = 0;
       for(const k of recentReads){
         counts[k] = (counts[k] || 0) + 1;
         if(counts[k] > bestCount){ bestCount = counts[k]; bestKey = k; }
       }
-
       if(bestCount >= VOTE_THRESHOLD){
         await showConfirm({ key: bestKey, source: 'ocr' });
         resetVoting();
@@ -520,35 +491,38 @@ async function runOcrPass(){
 
 async function runBarcodePass(){
   if(!barcodeRunning) return;
-
   if(barcodeBusy || document.getElementById('confirmCard').style.display === 'block' || !video.videoWidth){
     setTimeout(runBarcodePass, 100);
     return;
   }
-
   barcodeBusy = true;
   ocrStatus.textContent = 'Ищем штрихкод…';
-
   try{
     const vw = video.videoWidth, vh = video.videoHeight;
     const side = Math.min(vw, vh) * 0.72;
     const sx = (vw - side) / 2;
     const sy = (vh - side) / 2;
-    const targetSize = 900;
+    const targetSize = 1200; // больше разрешение для EAN-13
 
     canvas.width = targetSize;
     canvas.height = targetSize;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(video, sx, sy, side, side, 0, 0, targetSize, targetSize);
 
-    barcodeImg.src = canvas.toDataURL('image/png');
-    await new Promise((resolve, reject) => {
-      barcodeImg.onload = resolve;
-      barcodeImg.onerror = reject;
-    });
+    // Конвертируем RGBA (4 байта) в RGB (3 байта) для ZXing
+    const imageData = ctx.getImageData(0, 0, targetSize, targetSize);
+    const rgba = imageData.data;
+    const rgb = new Uint8Array(targetSize * targetSize * 3);
+    for(let i = 0, j = 0; i < rgba.length; i += 4, j += 3){
+      rgb[j] = rgba[i];
+      rgb[j + 1] = rgba[i + 1];
+      rgb[j + 2] = rgba[i + 2];
+    }
 
-    const result = await barcodeReader.decodeFromImageElement(barcodeImg);
-    const code = result.getText();
+    const luminanceSource = new ZXing.RGBLuminanceSource(rgb, targetSize, targetSize);
+    const binaryBitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(luminanceSource));
+    const result = barcodeReader.decodeWithState(binaryBitmap);
+    const code = result.text;
 
     if(barcodeCache && barcodeCache.has(code)){
       await showConfirm({ key: barcodeCache.get(code), source: 'barcode' });
@@ -557,6 +531,7 @@ async function runBarcodePass(){
       ocrStatus.textContent = `Штрихкод ${code} прочитан, но не найден в таблице`;
     }
   }catch(e){
+    // Штрихкод не найден на кадре — нормально
     ocrStatus.textContent = 'Ищем штрихкод…';
   }finally{
     barcodeBusy = false;
