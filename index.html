@@ -99,7 +99,8 @@
       </div>
       <div class="scan-row">
         <button class="btn-icon" id="clearBtn" title="Очистить историю">🗑</button>
-        <button class="btn-primary" id="openCamera">📷 Сканировать</button>
+        <button class="btn-primary" id="openCameraOcr">📷 OCR</button>
+        <button class="btn-primary" id="openCameraBarcode">📷 ШК</button>
       </div>
     </div>
   </div>
@@ -386,6 +387,11 @@ function resetVoting(){
   recentReads = [];
 }
 
+// Тестовый режим: OCR и штрихкод запускаются отдельными кнопками и работают каждый
+// по своему циклу, без пересечения — barcodeRunning/barcodeBusy не связаны с ocrRunning/ocrBusy.
+let barcodeRunning = false;
+let barcodeBusy = false;
+
 async function getWorker(){
   if(worker) return worker;
   ocrStatus.textContent = 'Загружаем модуль распознавания…';
@@ -397,7 +403,7 @@ async function getWorker(){
   return worker;
 }
 
-async function startCamera(){
+async function startCamera(mode){
   camError.style.display = 'none';
   camError.textContent = '';
   ocrStatus.textContent = 'Запрашиваем доступ к камере…';
@@ -408,9 +414,15 @@ async function startCamera(){
     });
     video.srcObject = stream;
     await video.play();
-    await getWorker(); // готовим worker заранее, пока пользователь наводит камеру
-    ocrStatus.textContent = 'Наводим камеру и держим ровно…';
-    startOcrLoop();
+
+    if(mode === 'ocr'){
+      await getWorker(); // готовим worker заранее, пока пользователь наводит камеру
+      ocrStatus.textContent = 'Наводим камеру и держим ровно…';
+      startOcrLoop();
+    } else {
+      ocrStatus.textContent = 'Наводим камеру на штрихкод…';
+      startBarcodeLoop();
+    }
   }catch(err){
     ocrStatus.textContent = '';
     camError.style.display = 'block';
@@ -425,7 +437,8 @@ async function startCamera(){
 }
 
 function stopCamera(){
-  ocrRunning = false; // цикл сам остановится на следующей проверке этого флага
+  ocrRunning = false; // оба цикла сами остановятся на следующей проверке своего флага
+  barcodeRunning = false;
   resetVoting();
   try{ barcodeReader.reset(); }catch(e){ /* нечего останавливать — это нормально */ }
   if(stream){
@@ -438,6 +451,11 @@ function stopCamera(){
 function startOcrLoop(){
   ocrRunning = true;
   runOcrPass(); // запускаем цепочку — каждая следующая попытка стартует сама сразу после завершения предыдущей
+}
+
+function startBarcodeLoop(){
+  barcodeRunning = true;
+  runBarcodePass();
 }
 
 // Приводим вырезанный кадр к чёрно-белому с усиленным контрастом и порогом (threshold) —
@@ -486,69 +504,89 @@ async function runOcrPass(){
     canvas.height = targetSize;
     const ctx = canvas.getContext('2d');
     ctx.drawImage(video, sx, sy, side, side, 0, 0, targetSize, targetSize);
+    preprocessCanvas(ctx, targetSize, targetSize);
 
-    // Сначала пробуем штрихкод — на том же вырезанном под рамку кадре, ещё до того как
-    // картинка приведена к чёрно-белому порогу для OCR (порог мешает штрихкод-декодеру,
-    // у него своя внутренняя бинаризация). В этой версии zxing нет decodeFromCanvas —
-    // есть только decodeFromImageElement, поэтому кадр сначала переносится в скрытый <img>.
-    let barcodeParsed = null;
-    try{
-      barcodeImg.src = canvas.toDataURL('image/png');
-      await new Promise((resolve, reject) => {
-        barcodeImg.onload = resolve;
-        barcodeImg.onerror = reject;
-      });
-      const result = await barcodeReader.decodeFromImageElement(barcodeImg);
-      const code = result.getText();
-      if(barcodeCache && barcodeCache.has(code)){
-        barcodeParsed = { key: barcodeCache.get(code), source: 'barcode' };
+    const w = await getWorker();
+    const { data } = await w.recognize(canvas);
+
+    const parsed = parseOcrText(data.text || '');
+
+    if(parsed && parsed.key){
+      recentReads.push(parsed.key);
+      if(recentReads.length > VOTE_WINDOW) recentReads.shift();
+
+      const counts = {};
+      let bestKey = null, bestCount = 0;
+      for(const k of recentReads){
+        counts[k] = (counts[k] || 0) + 1;
+        if(counts[k] > bestCount){ bestCount = counts[k]; bestKey = k; }
       }
-      // Штрихкод прочитан, но в таблице штрихкодов его нет — молча идём в OCR ниже.
-    }catch(e){
-      // Штрихкод не найден в кадре — это нормальная ситуация на каждом кадре, молча продолжаем.
-    }
 
-    if(barcodeParsed){
-      await showConfirm(barcodeParsed);
-      resetVoting();
-      ocrStatus.textContent = 'Распознано (ШК)';
-    } else {
-      preprocessCanvas(ctx, targetSize, targetSize);
-
-      const w = await getWorker();
-      const { data } = await w.recognize(canvas);
-
-      const parsed = parseOcrText(data.text || '');
-
-      if(parsed && parsed.key){
-        recentReads.push(parsed.key);
-        if(recentReads.length > VOTE_WINDOW) recentReads.shift();
-
-        const counts = {};
-        let bestKey = null, bestCount = 0;
-        for(const k of recentReads){
-          counts[k] = (counts[k] || 0) + 1;
-          if(counts[k] > bestCount){ bestCount = counts[k]; bestKey = k; }
-        }
-
-        if(bestCount >= VOTE_THRESHOLD){
-          await showConfirm({ key: bestKey, source: 'ocr' });
-          resetVoting();
-          ocrStatus.textContent = 'Распознано (OCR)';
-        } else {
-          ocrStatus.textContent = `Распознаём… (${bestCount}/${VOTE_THRESHOLD})`;
-        }
-      } else if(parsed && parsed.articul){
-        ocrStatus.textContent = `Вижу артикул ${parsed.articul}, ищу цвет…`;
+      if(bestCount >= VOTE_THRESHOLD){
+        await showConfirm({ key: bestKey, source: 'ocr' });
+        resetVoting();
+        ocrStatus.textContent = 'Распознано (OCR)';
       } else {
-        ocrStatus.textContent = 'Наводим камеру и держим ровно…';
+        ocrStatus.textContent = `Распознаём… (${bestCount}/${VOTE_THRESHOLD})`;
       }
+    } else if(parsed && parsed.articul){
+      ocrStatus.textContent = `Вижу артикул ${parsed.articul}, ищу цвет…`;
+    } else {
+      ocrStatus.textContent = 'Наводим камеру и держим ровно…';
     }
   }catch(err){
     ocrStatus.textContent = 'Ошибка распознавания, пробуем снова…';
   }finally{
     ocrBusy = false;
     if(ocrRunning) runOcrPass(); // сразу планируем следующую попытку, без искусственной паузы
+  }
+}
+
+// Отдельный, независимый цикл штрихкода — не трогает ocrRunning/ocrBusy/recentReads,
+// не запускает OCR ни при каких обстоятельствах. Только штрихкод.
+async function runBarcodePass(){
+  if(!barcodeRunning) return; // камера закрыта — останавливаем цепочку
+
+  if(barcodeBusy || document.getElementById('confirmCard').style.display === 'block' || !video.videoWidth){
+    setTimeout(runBarcodePass, 100);
+    return;
+  }
+
+  barcodeBusy = true;
+  ocrStatus.textContent = 'Ищем штрихкод…';
+
+  try{
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const side = Math.min(vw, vh) * 0.72;
+    const sx = (vw - side) / 2;
+    const sy = (vh - side) / 2;
+    const targetSize = 900;
+
+    canvas.width = targetSize;
+    canvas.height = targetSize;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, sx, sy, side, side, 0, 0, targetSize, targetSize);
+
+    barcodeImg.src = canvas.toDataURL('image/png');
+    await new Promise((resolve, reject) => {
+      barcodeImg.onload = resolve;
+      barcodeImg.onerror = reject;
+    });
+
+    const result = await barcodeReader.decodeFromImageElement(barcodeImg);
+    const code = result.getText();
+
+    if(barcodeCache && barcodeCache.has(code)){
+      await showConfirm({ key: barcodeCache.get(code), source: 'barcode' });
+      ocrStatus.textContent = 'Распознано (ШК)';
+    } else {
+      ocrStatus.textContent = `Штрихкод ${code} прочитан, но не найден в таблице`;
+    }
+  }catch(e){
+    ocrStatus.textContent = 'Ищем штрихкод…';
+  }finally{
+    barcodeBusy = false;
+    if(barcodeRunning) runBarcodePass();
   }
 }
 
@@ -563,13 +601,16 @@ async function showConfirm(parsed){
 }
 
 // ===== СОБЫТИЯ КНОПОК =====
-document.getElementById('openCamera').onclick = () => {
+function openCameraWithMode(mode){
   document.getElementById('listScreen').style.display = 'none';
   document.getElementById('cameraScreen').style.display = 'block';
   document.getElementById('confirmCard').style.display = 'none';
   document.getElementById('scanToast').style.display = 'none';
-  startCamera();
-};
+  startCamera(mode);
+}
+
+document.getElementById('openCameraOcr').onclick = () => openCameraWithMode('ocr');
+document.getElementById('openCameraBarcode').onclick = () => openCameraWithMode('barcode');
 
 document.getElementById('closeCamera').onclick = () => {
   stopCamera();
