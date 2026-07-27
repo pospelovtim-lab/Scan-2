@@ -121,6 +121,7 @@
       </div>
     </div>
     <canvas id="canvas" style="display:none;"></canvas>
+    <img id="barcodeImg" style="display:none;">
 
     <p class="ocr-status" id="ocrStatus">Наводим камеру и держим ровно…</p>
     <div class="cam-error" id="camError"></div>
@@ -364,6 +365,7 @@ const video = document.getElementById('video');
 const canvas = document.getElementById('canvas');
 const ocrStatus = document.getElementById('ocrStatus');
 const camError = document.getElementById('camError');
+const barcodeImg = document.getElementById('barcodeImg');
 
 // Голосование по кадрам: не показываем карточку по первому же распознанному ключу,
 // а копим последние VOTE_WINDOW валидных чтений (артикул+цвет) и ждём, пока один и тот же
@@ -487,10 +489,16 @@ async function runOcrPass(){
 
     // Сначала пробуем штрихкод — на том же вырезанном под рамку кадре, ещё до того как
     // картинка приведена к чёрно-белому порогу для OCR (порог мешает штрихкод-декодеру,
-    // у него своя внутренняя бинаризация).
+    // у него своя внутренняя бинаризация). В этой версии zxing нет decodeFromCanvas —
+    // есть только decodeFromImageElement, поэтому кадр сначала переносится в скрытый <img>.
     let barcodeParsed = null;
     try{
-      const result = await barcodeReader.decodeFromCanvas(canvas);
+      barcodeImg.src = canvas.toDataURL('image/png');
+      await new Promise((resolve, reject) => {
+        barcodeImg.onload = resolve;
+        barcodeImg.onerror = reject;
+      });
+      const result = await barcodeReader.decodeFromImageElement(barcodeImg);
       const code = result.getText();
       if(barcodeCache && barcodeCache.has(code)){
         barcodeParsed = { key: barcodeCache.get(code), source: 'barcode' };
