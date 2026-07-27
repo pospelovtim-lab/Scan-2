@@ -402,7 +402,7 @@ async function startCamera(mode){
       await html5QrCode.start(
         { facingMode: "environment" },
         {
-          fps: 10,
+          fps: 30,
           qrbox: { width: 250, height: 250 },
           formatsToSupport: [ Html5QrcodeSupportedFormats.EAN_13 ]
         },
@@ -554,14 +554,7 @@ async function runBarcodePass(){
     const ctx = canvas.getContext('2d');
     ctx.drawImage(video, sx, sy, side, side, 0, 0, targetSize, targetSize);
 
-    // Конвертируем RGBA (4 байта) в RGB (3 байта) для ZXing
-    const imageData = ctx.getImageData(0, 0, targetSize, targetSize);
-    const rgba = imageData.data;
-    const rgb = new Uint8Array(targetSize * targetSize * 3);
-    for(let i = 0, j = 0; i < rgba.length; i += 4, j += 3){
-      rgb[j] = rgba[i];
-      rgb[j + 1] = rgba[i + 1];
-      rgb[j + 2] = rgba[i + 2];
+  
     }
 
     const luminanceSource = new ZXing.RGBLuminanceSource(rgb, targetSize, targetSize);
