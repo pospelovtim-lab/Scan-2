@@ -391,16 +391,15 @@ const VOTE_WINDOW = 8;
 const VOTE_THRESHOLD = 5;
 let recentReads = [];
 
-// Компания использует только EAN-13 — ограничиваем декодер этим форматом.
+// Форматы штрихкодов, которые встречаются на бирках компании — плюс TRY_HARDER,
+// чтобы декодер пробовал дополнительные алгоритмы вместо одного быстрого прохода.
 const barcodeHints = new Map();
-barcodeHints.set(
-    ZXing.DecodeHintType.POSSIBLE_FORMATS,
-    [
-        ZXing.BarcodeFormat.EAN_13,
-        ZXing.BarcodeFormat.CODE_128,
-        ZXing.BarcodeFormat.EAN_8
-    ]
-);
+barcodeHints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+  ZXing.BarcodeFormat.EAN_13,
+  ZXing.BarcodeFormat.CODE_128,
+  ZXing.BarcodeFormat.EAN_8
+]);
+barcodeHints.set(ZXing.DecodeHintType.TRY_HARDER, true);
 const barcodeReader = new ZXing.BrowserMultiFormatReader(barcodeHints);
 
 function resetVoting(){
@@ -425,7 +424,12 @@ async function startCamera(){
   resetVoting();
   try{
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1000 }, height: { ideal: 1000 } }
+      video: {
+        facingMode: 'environment',
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        focusMode: { ideal: 'continuous' } // где не поддерживается — просто игнорируется
+      }
     });
     video.srcObject = stream;
     await video.play();
@@ -474,20 +478,53 @@ function preprocessCanvas(ctx, width, height){
   ctx.putImageData(imageData, 0, 0);
 }
 
+// Для штрихкода — только градации серого + лёгкая резкость (усиление контраста на границах),
+// БЕЗ порога: жёсткий threshold мешает встроенному HybridBinarizer внутри zxing, а резкость
+// ему, наоборот, помогает разобрать тонкие полосы EAN-13 на смазанном/неидеальном кадре.
+function sharpenGrayscaleCanvas(ctx, width, height){
+  const imageData = ctx.getImageData(0, 0, width, height);
+  const d = imageData.data;
+  const gray = new Float32Array(width * height);
+  for(let i = 0, p = 0; i < d.length; i += 4, p++){
+    gray[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  }
+
+  // Простое ядро резкости 3x3
+  for(let y = 1; y < height - 1; y++){
+    for(let x = 1; x < width - 1; x++){
+      const p = y * width + x;
+      const sum = gray[p] * 5
+        - gray[p - 1] - gray[p + 1]
+        - gray[p - width] - gray[p + width];
+      const val = Math.max(0, Math.min(255, sum));
+      const idx = p * 4;
+      d[idx] = d[idx + 1] = d[idx + 2] = val;
+    }
+  }
+  // Края (без полного набора соседей для свёртки) — просто градации серого без резкости
+  for(let p = 0; p < width * height; p++){
+    const x = p % width, y = (p / width) | 0;
+    if(x === 0 || y === 0 || x === width - 1 || y === height - 1){
+      const idx = p * 4;
+      d[idx] = d[idx + 1] = d[idx + 2] = gray[p];
+    }
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+}
+
 // Пробуем прочитать штрихкод из переданного canvas. Переиспользуем ОДИН barcodeReader и
 // ОДИН скрытый <img> — пересоздание их на каждый кадр (как было раньше) — самая дорогая
-// часть цикла. Кодируем в JPEG (быстрее PNG для «шумного» кадра с камеры), и предварительно
-// уменьшаем кадр — для чтения штрихкода избыточное разрешение камеры не нужно, а кодирование
-// большого кадра в data URL — самая медленная операция во всём цикле.
+// часть цикла. Кодируем в JPEG (быстрее PNG для «шумного» кадра с камеры).
 async function tryDecodeBarcode(sourceCanvas){
   try{
-    barcodeImg.src = sourceCanvas.toDataURL('image/jpeg', 0.85);
+    barcodeImg.src = sourceCanvas.toDataURL('image/jpeg', 0.93);
     await new Promise((resolve, reject) => {
       barcodeImg.onload = resolve;
       barcodeImg.onerror = reject;
     });
 
-    const timeoutPromise = new Promise(resolve => setTimeout(() => resolve(null), 600));
+    const timeoutPromise = new Promise(resolve => setTimeout(() => resolve(null), 900));
     const decodePromise = (async () => {
       try{
         const result = await barcodeReader.decodeFromImageElement(barcodeImg);
@@ -522,15 +559,17 @@ async function runScanPass(){
 
     // Штрихкод — по всему кадру целиком, без обрезки под рамку. Так пользователю не
     // нужно целиться именно в штрихкод — достаточно навести камеру на бирку в целом.
-    // Уменьшаем перед кодированием: полное разрешение камеры для чтения штрихкода избыточно,
-    // а кодирование большого кадра в data URL — самая медленная часть цикла.
-    const barcodeMaxSide = 700;
+    // Разрешение поднято с 700 до 1300 — штрихкоду на бирке доставалось слишком мало
+    // пикселей на полосу при более мелком кадре.
+    const barcodeMaxSide = 1300;
     const barcodeScale = Math.min(1, barcodeMaxSide / Math.max(vw, vh));
     const bw = Math.round(vw * barcodeScale);
     const bh = Math.round(vh * barcodeScale);
     barcodeCanvas.width = bw;
     barcodeCanvas.height = bh;
-    barcodeCanvas.getContext('2d').drawImage(video, 0, 0, bw, bh);
+    const bctx = barcodeCanvas.getContext('2d');
+    bctx.drawImage(video, 0, 0, bw, bh);
+    sharpenGrayscaleCanvas(bctx, bw, bh);
 
     const barcodeText = await tryDecodeBarcode(barcodeCanvas);
     let barcodeParsed = null;
