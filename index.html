@@ -472,15 +472,37 @@ function preprocessCanvas(ctx, width, height){
 // в скрытый <img>). Возвращает распознанный текст штрихкода или null, если не найден.
 async function tryDecodeBarcode(sourceCanvas){
   try{
-    barcodeImg.src = sourceCanvas.toDataURL('image/png');
-    await new Promise((resolve, reject) => {
-      barcodeImg.onload = resolve;
-      barcodeImg.onerror = reject;
+    const img = new Image();
+
+    const loadPromise = new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = reject;
     });
-    const result = await barcodeReader.decodeFromImageElement(barcodeImg);
-    return result.getText();
+
+    img.src = sourceCanvas.toDataURL('image/png');
+    await loadPromise;
+
+    const reader = new ZXing.BrowserMultiFormatReader(barcodeHints);
+
+    const timeoutPromise = new Promise(resolve =>
+      setTimeout(() => resolve(null), 800)
+    );
+
+    const decodePromise = (async () => {
+      try{
+        const result = await reader.decodeFromImageElement(img);
+        return result ? result.getText() : null;
+      } catch(e){
+        return null;
+      } finally {
+        try{ reader.reset(); }catch(e){}
+      }
+    })();
+
+    return await Promise.race([decodePromise, timeoutPromise]);
   }catch(e){
-    return null; // штрихкода нет в кадре — это нормальная ситуация на каждом кадре
+    console.error(e);
+    return null;
   }
 }
 
