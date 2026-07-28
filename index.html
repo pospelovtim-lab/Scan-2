@@ -467,42 +467,32 @@ function preprocessCanvas(ctx, width, height){
   ctx.putImageData(imageData, 0, 0);
 }
 
-// Пробуем прочитать штрихкод из переданного canvas (декодер этой версии zxing не умеет
-// decodeFromCanvas — только decodeFromImageElement, поэтому кадр сначала переносится
-// в скрытый <img>). Возвращает распознанный текст штрихкода или null, если не найден.
+// Пробуем прочитать штрихкод из переданного canvas. Переиспользуем ОДИН barcodeReader и
+// ОДИН скрытый <img> — пересоздание их на каждый кадр (как было раньше) — самая дорогая
+// часть цикла. Кодируем в JPEG (быстрее PNG для «шумного» кадра с камеры), и предварительно
+// уменьшаем кадр — для чтения штрихкода избыточное разрешение камеры не нужно, а кодирование
+// большого кадра в data URL — самая медленная операция во всём цикле.
 async function tryDecodeBarcode(sourceCanvas){
   try{
-    const img = new Image();
-
-    const loadPromise = new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = reject;
+    barcodeImg.src = sourceCanvas.toDataURL('image/jpeg', 0.85);
+    await new Promise((resolve, reject) => {
+      barcodeImg.onload = resolve;
+      barcodeImg.onerror = reject;
     });
 
-    img.src = sourceCanvas.toDataURL('image/png');
-    await loadPromise;
-
-    const reader = new ZXing.BrowserMultiFormatReader(barcodeHints);
-
-    const timeoutPromise = new Promise(resolve =>
-      setTimeout(() => resolve(null), 800)
-    );
-
+    const timeoutPromise = new Promise(resolve => setTimeout(() => resolve(null), 600));
     const decodePromise = (async () => {
       try{
-        const result = await reader.decodeFromImageElement(img);
+        const result = await barcodeReader.decodeFromImageElement(barcodeImg);
         return result ? result.getText() : null;
-      } catch(e){
+      }catch(e){
         return null;
-      } finally {
-        try{ reader.reset(); }catch(e){}
       }
     })();
 
     return await Promise.race([decodePromise, timeoutPromise]);
   }catch(e){
-    console.error(e);
-    return null;
+    return null; // штрихкода нет в кадре — это нормальная ситуация на каждом кадре
   }
 }
 
@@ -525,9 +515,15 @@ async function runScanPass(){
 
     // Штрихкод — по всему кадру целиком, без обрезки под рамку. Так пользователю не
     // нужно целиться именно в штрихкод — достаточно навести камеру на бирку в целом.
-    barcodeCanvas.width = vw;
-    barcodeCanvas.height = vh;
-    barcodeCanvas.getContext('2d').drawImage(video, 0, 0, vw, vh);
+    // Уменьшаем перед кодированием: полное разрешение камеры для чтения штрихкода избыточно,
+    // а кодирование большого кадра в data URL — самая медленная часть цикла.
+    const barcodeMaxSide = 700;
+    const barcodeScale = Math.min(1, barcodeMaxSide / Math.max(vw, vh));
+    const bw = Math.round(vw * barcodeScale);
+    const bh = Math.round(vh * barcodeScale);
+    barcodeCanvas.width = bw;
+    barcodeCanvas.height = bh;
+    barcodeCanvas.getContext('2d').drawImage(video, 0, 0, bw, bh);
 
     const barcodeText = await tryDecodeBarcode(barcodeCanvas);
     let barcodeParsed = null;
