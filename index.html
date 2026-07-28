@@ -393,7 +393,14 @@ let recentReads = [];
 
 // Компания использует только EAN-13 — ограничиваем декодер этим форматом.
 const barcodeHints = new Map();
-barcodeHints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13]);
+barcodeHints.set(
+    ZXing.DecodeHintType.POSSIBLE_FORMATS,
+    [
+        ZXing.BarcodeFormat.EAN_13,
+        ZXing.BarcodeFormat.CODE_128,
+        ZXing.BarcodeFormat.EAN_8
+    ]
+);
 const barcodeReader = new ZXing.BrowserMultiFormatReader(barcodeHints);
 
 function resetVoting(){
