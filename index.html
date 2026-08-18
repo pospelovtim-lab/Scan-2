@@ -163,7 +163,7 @@
     <button class="sim-btn" id="simulateScan">Симулировать распознавание</button>
   </div>
 
-  <p class="section-note">Сканер готов к работе (пока)</p>
+  <p class="section-note">ШК — данные с backend, OCR — старый источник (пока)</p>
 </div>
 
 <script>
@@ -286,22 +286,26 @@ const BACKEND_BASE_URL = 'https://barcode-api.duckdns.org:8443';
 let barcodeScanned = false;
 
 // Возвращает { key, flatlay, model } если штрихкод найден на backend'е,
-// null если не найден (обычный 404 — штрихкода нет в базе), либо
-// строку 'error' при сетевой ошибке/недоступности backend'а (чтобы
-// отличать "не найдено" от "не смогли спросить").
+// null если не найден, либо строку 'error' при сетевой ошибке/
+// недоступности backend'а (чтобы отличать "не найдено" от "не смогли
+// спросить"). Реальный формат ответа backend'а:
+//   {"found":true,"matches":[{"record_id":"BF2645361002_1",
+//     "article":"BF2645361002","color":"1","flatlay":false,"model":true}]}
+// flatlay/model приходят готовыми — отдельно спрашивать статус не нужно.
 async function lookupBarcodeOnBackend(code){
   try {
     const resp = await fetch(`${BACKEND_BASE_URL}/api/v1/lookup/${encodeURIComponent(code)}`);
     if (resp.status === 404) return null;
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const row = await resp.json();
-    if (!row || !row.record_id) return null;
-    const key = String(row.record_id).trim().toUpperCase();
-    let payload = {};
-    try { payload = JSON.parse(row.public_payload_json || '{}'); } catch (e) { payload = {}; }
-    return { key, flatlay: !!payload.flatlay, model: !!payload.model };
+    const data = await resp.json();
+    if (!data || !data.found || !Array.isArray(data.matches) || data.matches.length === 0) {
+      return null;
+    }
+    const m = data.matches[0];
+    const key = String(m.record_id).trim().toUpperCase();
+    return { key, flatlay: !!m.flatlay, model: !!m.model };
   } catch (err) {
-    console.error('❌ Ошибка запроса штрихкода к серверу:', err);
+    console.error('❌ Ошибка запроса штрихкода к backend:', err);
     return 'error';
   }
 }
@@ -424,7 +428,7 @@ async function startCamera(mode){
             const found = await lookupBarcodeOnBackend(code);
             if(found === 'error'){
               barcodeScanned = false;
-              ocrStatus.textContent = 'Сервер недоступен, попробуйте снова';
+              ocrStatus.textContent = 'Backend недоступен, попробуйте снова';
             } else if(found){
               await showConfirm({ key: found.key, source: 'barcode' });
               ocrStatus.textContent = 'Распознано (ШК)';
@@ -602,7 +606,15 @@ async function runBarcodePass(){
 }
 
 async function showConfirm(parsed){
-  pendingItem = await lookup(parsed.key);
+  // ШК-режим уже приносит готовые flatlay/model от backend'а — не
+  // нужно повторно спрашивать старую (устаревшую) таблицу статусов.
+  // OCR-режим статус не приносит с собой, поэтому для него всё ещё
+  // ищем по ключу в tableCache, как раньше.
+  if (parsed.source === 'barcode') {
+    pendingItem = { key: parsed.key, flatlay: parsed.flatlay, model: parsed.model };
+  } else {
+    pendingItem = await lookup(parsed.key);
+  }
   document.getElementById('confirmValue').textContent = pendingItem.key;
   const sourceLabel = parsed.source === 'barcode' ? 'Источник: ШК' : parsed.source === 'ocr' ? 'Источник: OCR' : '';
   document.getElementById('confirmSource').textContent = sourceLabel;
@@ -676,10 +688,10 @@ document.getElementById('clearBtn').onclick = () => { items = []; renderList(); 
 document.getElementById('barcodeCheck').onclick = async () => {
   const code = document.getElementById('barcodeInput').value.trim();
   if(!code) return;
-  ocrStatus.textContent = 'Спрашиваем сервер…';
+  ocrStatus.textContent = 'Спрашиваем backend…';
   const found = await lookupBarcodeOnBackend(code);
   if(found === 'error'){
-    ocrStatus.textContent = 'Сервер недоступен, попробуйте снова';
+    ocrStatus.textContent = 'Backend недоступен, попробуйте снова';
   } else if(found){
     await showConfirm({ key: found.key, source: 'barcode' });
     ocrStatus.textContent = 'Распознано (ШК, ручной ввод)';
@@ -767,11 +779,11 @@ document.getElementById('barcodeFile').onchange = async (e) => {
 
         const found = await lookupBarcodeOnBackend(barcodeText);
         if(found && found !== 'error'){
-          console.log('[ШК-лог] 11. Найден на сервере:', found.key);
+          console.log('[ШК-лог] 11. Найден на backend:', found.key);
           await showConfirm({ key: found.key, source: 'barcode' });
           ocrStatus.textContent = 'Распознано (ШК, из файла)';
         } else {
-          console.log('[ШК-лог] 11. Не найден на сервере или недоступен:', found);
+          console.log('[ШК-лог] 11. Не найден на backend или backend недоступен:', found);
           ocrStatus.textContent = '[Лог] ШК ' + barcodeText + ' не найден';
         }
       } else {
