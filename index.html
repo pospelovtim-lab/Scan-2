@@ -294,7 +294,10 @@ let barcodeScanned = false;
 // flatlay/model приходят готовыми — отдельно спрашивать статус не нужно.
 async function lookupBarcodeOnBackend(code){
   try {
-    const resp = await fetch(`${BACKEND_BASE_URL}/api/v1/lookup/${encodeURIComponent(code)}`);
+    const resp = await fetch(
+      `${BACKEND_BASE_URL}/api/v1/lookup/${encodeURIComponent(code)}`,
+      { cache: 'no-store' }
+    );
     if (resp.status === 404) return null;
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
