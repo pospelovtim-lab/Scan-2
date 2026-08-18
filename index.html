@@ -163,11 +163,18 @@
     <button class="sim-btn" id="simulateScan">Симулировать распознавание</button>
   </div>
 
-  <p class="section-note">Данные из Google Диска подгружаются автоматически</p>
+  <p class="section-note">ШК — данные с backend, OCR — старый источник (пока)</p>
 </div>
 
 <script>
-// ==================== GOOGLE DRIVE И НАСТРОЙКИ ====================
+// ==================== СТАТУСЫ (OCR-режим) — ПОКА СТАРЫЙ ИСТОЧНИК ====================
+// ВАЖНО: photo_status_scanner.py больше НЕ заливает эту таблицу никуда в
+// облако (полностью локальный table_local.xlsx с момента отказа от
+// Яндекс.Диска) — то есть эта Google-таблица с этого момента не
+// обновляется и будет постепенно устаревать. OCR-режим будет
+// показывать статусы "замороженными" на последнем моменте, когда сюда
+// ещё что-то писалось, пока не появится /api/v1/export на backend'е
+// (см. отдельное обсуждение) и OCR не переключат на него так же, как ШК.
 const FILE_ID = '19OphkawbvP9szdu3qYnAC_zs9O7aU1sp';
 const TABLE_URL = `https://docs.google.com/spreadsheets/d/${FILE_ID}/export?format=xlsx`;
 const CACHE_MS = 30 * 60 * 1000;
@@ -267,44 +274,45 @@ function renderList(){
   `).join('');
 }
 
-// ==================== ТАБЛИЦА ШТРИХКОДОВ ====================
-const BARCODE_FILE_ID = '1pv6XYQuxQOoNBPCY7-pzbexk1qhdjJlS';
-const BARCODE_TABLE_URL = `https://docs.google.com/spreadsheets/d/${BARCODE_FILE_ID}/export?format=xlsx`;
+// ==================== ШТРИХКОДЫ (ШК-режим) — ЖИВОЙ ЗАПРОС К BACKEND ====================
+// В отличие от OCR-таблицы выше, ШК-backend уже реально работает и
+// обновляется (photo_status_scanner.py заливает по SFTP каждые 30 мин).
+// Поэтому, в отличие от старого подхода (скачать всю таблицу штрихкодов
+// разом), здесь на каждый скан делается отдельный живой запрос —
+// таблица целиком со стороны backend'а пока не отдаётся
+// (см. отдельное обсуждение про /api/v1/export).
+const BACKEND_BASE_URL = 'https://barcode-api.duckdns.org:8443';
 
-let barcodeCache = null;
 let barcodeScanned = false;
 
-async function fetchBarcodeTable(){
+// Возвращает { key, flatlay, model } если штрихкод найден на backend'е,
+// null если не найден (обычный 404 — штрихкода нет в базе), либо
+// строку 'error' при сетевой ошибке/недоступности backend'а (чтобы
+// отличать "не найдено" от "не смогли спросить").
+async function lookupBarcodeOnBackend(code){
   try {
-    const buf = await fetchWithRetry(BARCODE_TABLE_URL);
-    const wb = XLSX.read(buf, { type: 'array' });
-    const sheet = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-
-    const map = new Map();
-    for(let i = 1; i < rows.length; i++){
-      const r = rows[i];
-      if(!r || !r[0]) continue;
-      const barcode = String(r[0]).trim();
-      const articul = String(r[2] || '').trim().toUpperCase();
-      const color = String(r[4] || '').trim();
-      if(!barcode || !articul || !color) continue;
-      map.set(barcode, `${articul}_${color}`);
-    }
-
-    console.log('✅ Таблица штрихкодов загружена. Всего:', map.size);
-    barcodeCache = map;
-  } catch(err) {
-    console.error('❌ Ошибка загрузки таблицы штрихкодов:', err);
-    barcodeCache = new Map();
+    const resp = await fetch(`${BACKEND_BASE_URL}/api/v1/lookup/${encodeURIComponent(code)}`);
+    if (resp.status === 404) return null;
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const row = await resp.json();
+    if (!row || !row.record_id) return null;
+    const key = String(row.record_id).trim().toUpperCase();
+    let payload = {};
+    try { payload = JSON.parse(row.public_payload_json || '{}'); } catch (e) { payload = {}; }
+    return { key, flatlay: !!payload.flatlay, model: !!payload.model };
+  } catch (err) {
+    console.error('❌ Ошибка запроса штрихкода к серверу:', err);
+    return 'error';
   }
 }
 
-// ===== ПОСЛЕДОВАТЕЛЬНАЯ ЗАГРУЗКА =====
+// ===== ЗАГРУЗКА ДАННЫХ ПРИ ОТКРЫТИИ СТРАНИЦЫ =====
+// ШК больше не требует предзагрузки — каждый скан бьёт в backend
+// напрямую, живьём.
 (async function init(){
   await fetchTable();
-  await fetchBarcodeTable();
 })();
+
 
 // ===== РАЗБОР ТЕКСТА OCR =====
 function parseOcrText(rawText){
@@ -412,14 +420,20 @@ async function startCamera(mode){
           if(document.getElementById('confirmCard').style.display === 'block') return;
           const code = String(decodedText).trim();
           try {
-            if(barcodeCache && barcodeCache.has(code)){
-              barcodeScanned = true;
-              await showConfirm({ key: barcodeCache.get(code), source: 'barcode' });
+            barcodeScanned = true;
+            const found = await lookupBarcodeOnBackend(code);
+            if(found === 'error'){
+              barcodeScanned = false;
+              ocrStatus.textContent = 'Сервер недоступен, попробуйте снова';
+            } else if(found){
+              await showConfirm({ key: found.key, source: 'barcode' });
               ocrStatus.textContent = 'Распознано (ШК)';
             } else {
+              barcodeScanned = false;
               ocrStatus.textContent = `Штрихкод «${code}» не найден в таблице`;
             }
           } catch(err) {
+            barcodeScanned = false;
             console.error('Ошибка в обработке ШК:', err);
             ocrStatus.textContent = 'Ошибка обработки штрихкода';
           }
@@ -571,11 +585,12 @@ async function runBarcodePass(){
     const result = barcodeReader.decodeWithState(binaryBitmap);
     const code = result.text;
 
-    if(barcodeCache && barcodeCache.has(code)){
-      await showConfirm({ key: barcodeCache.get(code), source: 'barcode' });
+    const found = await lookupBarcodeOnBackend(code);
+    if(found && found !== 'error'){
+      await showConfirm({ key: found.key, source: 'barcode' });
       ocrStatus.textContent = 'Распознано (ШК)';
     } else {
-      ocrStatus.textContent = `Штрихкод ${code} прочитан, но не найден в таблице`;
+      ocrStatus.textContent = `Штрихкод ${code} прочитан, но не найден`;
     }
   }catch(e){
     // Штрихкод не найден на кадре — нормально
@@ -661,12 +676,12 @@ document.getElementById('clearBtn').onclick = () => { items = []; renderList(); 
 document.getElementById('barcodeCheck').onclick = async () => {
   const code = document.getElementById('barcodeInput').value.trim();
   if(!code) return;
-  if(!barcodeCache){
-    ocrStatus.textContent = 'Таблица штрихкодов ещё загружается…';
-    return;
-  }
-  if(barcodeCache.has(code)){
-    await showConfirm({ key: barcodeCache.get(code), source: 'barcode' });
+  ocrStatus.textContent = 'Спрашиваем сервер…';
+  const found = await lookupBarcodeOnBackend(code);
+  if(found === 'error'){
+    ocrStatus.textContent = 'Сервер недоступен, попробуйте снова';
+  } else if(found){
+    await showConfirm({ key: found.key, source: 'barcode' });
     ocrStatus.textContent = 'Распознано (ШК, ручной ввод)';
   } else {
     ocrStatus.textContent = `Штрихкод ${code} не найден в таблице`;
@@ -750,13 +765,14 @@ document.getElementById('barcodeFile').onchange = async (e) => {
         console.log('[ШК-лог] 10. Распознан штрихкод:', barcodeText);
         ocrStatus.textContent = '[Лог] 10. ZXing нашёл: ' + barcodeText;
 
-        if(barcodeCache && barcodeCache.has(barcodeText)){
-          console.log('[ШК-лог] 11. Найден в таблице:', barcodeCache.get(barcodeText));
-          await showConfirm({ key: barcodeCache.get(barcodeText), source: 'barcode' });
+        const found = await lookupBarcodeOnBackend(barcodeText);
+        if(found && found !== 'error'){
+          console.log('[ШК-лог] 11. Найден на сервере:', found.key);
+          await showConfirm({ key: found.key, source: 'barcode' });
           ocrStatus.textContent = 'Распознано (ШК, из файла)';
         } else {
-          console.log('[ШК-лог] 11. Нет в таблице штрихкодов. Кэш загружен?', !!barcodeCache, 'размер:', barcodeCache ? barcodeCache.size : 0);
-          ocrStatus.textContent = '[Лог] ШК ' + barcodeText + ' не найден в таблице';
+          console.log('[ШК-лог] 11. Не найден на сервере или недоступен:', found);
+          ocrStatus.textContent = '[Лог] ШК ' + barcodeText + ' не найден';
         }
       } else {
         console.log('[ШК-лог] 10. ZXing не вернул текст. Ошибка была?', zxingError ? 'Да' : 'Нет');
