@@ -433,7 +433,7 @@ async function startCamera(mode){
               barcodeScanned = false;
               ocrStatus.textContent = 'Backend недоступен, попробуйте снова';
             } else if(found){
-              await showConfirm({ key: found.key, source: 'barcode' });
+              await showConfirm({ key: found.key, flatlay: found.flatlay, model: found.model, source: 'barcode' });
               ocrStatus.textContent = 'Распознано (ШК)';
             } else {
               barcodeScanned = false;
@@ -594,7 +594,7 @@ async function runBarcodePass(){
 
     const found = await lookupBarcodeOnBackend(code);
     if(found && found !== 'error'){
-      await showConfirm({ key: found.key, source: 'barcode' });
+      await showConfirm({ key: found.key, flatlay: found.flatlay, model: found.model, source: 'barcode' });
       ocrStatus.textContent = 'Распознано (ШК)';
     } else {
       ocrStatus.textContent = `Штрихкод ${code} прочитан, но не найден`;
@@ -696,7 +696,7 @@ document.getElementById('barcodeCheck').onclick = async () => {
   if(found === 'error'){
     ocrStatus.textContent = 'Backend недоступен, попробуйте снова';
   } else if(found){
-    await showConfirm({ key: found.key, source: 'barcode' });
+    await showConfirm({ key: found.key, flatlay: found.flatlay, model: found.model, source: 'barcode' });
     ocrStatus.textContent = 'Распознано (ШК, ручной ввод)';
   } else {
     ocrStatus.textContent = `Штрихкод ${code} не найден в таблице`;
@@ -783,7 +783,7 @@ document.getElementById('barcodeFile').onchange = async (e) => {
         const found = await lookupBarcodeOnBackend(barcodeText);
         if(found && found !== 'error'){
           console.log('[ШК-лог] 11. Найден на backend:', found.key);
-          await showConfirm({ key: found.key, source: 'barcode' });
+          await showConfirm({ key: found.key, flatlay: found.flatlay, model: found.model, source: 'barcode' });
           ocrStatus.textContent = 'Распознано (ШК, из файла)';
         } else {
           console.log('[ШК-лог] 11. Не найден на backend или backend недоступен:', found);
